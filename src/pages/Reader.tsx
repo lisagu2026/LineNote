@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { translateHighlight } from '../lib/api';
 import { useStore } from '../store';
 import { ChevronLeft, Star, Trash2, Edit3, BookOpen } from 'lucide-react';
 
@@ -7,7 +8,17 @@ const MOCK_ARTICLE = `Вчера я гулял по парку и увидел �
 
 export default function Reader() {
   const navigate = useNavigate();
-  const { articleTitle, articleText, setArticle, highlights, addHighlight, removeHighlight, updateHighlight } = useStore();
+  const {
+    articleTitle,
+    articleText,
+    setArticle,
+    highlights,
+    addHighlight,
+    removeHighlight,
+    updateHighlight,
+    translationCache,
+    setTranslationCache,
+  } = useStore();
   
   const [isEditing, setIsEditing] = useState(!articleText);
   const [titleInput, setTitleInput] = useState(articleTitle || '俄语精读：公园散步');
@@ -22,12 +33,42 @@ export default function Reader() {
     start: number;
     end: number;
     loading: boolean;
-    mockTranslation: string;
+    translationZh: string;
+    lemma: string;
+    usageNote: string;
+    example: string;
+    note: string;
+    error?: string;
     existingId?: string;
     isImportant?: boolean;
   } | null>(null);
   
   const contentRef = useRef<HTMLDivElement>(null);
+  const requestSeqRef = useRef(0);
+
+  const getCacheKey = (originalText: string, contextSentence: string) => {
+    return `${originalText}::${contextSentence}`.toLowerCase();
+  };
+
+  const getContextSentence = (text: string, start: number, end: number) => {
+    const left = text.slice(0, start);
+    const right = text.slice(end);
+    const leftBoundary = Math.max(
+      left.lastIndexOf('.'),
+      left.lastIndexOf('!'),
+      left.lastIndexOf('?'),
+      left.lastIndexOf('\n')
+    );
+    const rightCandidates = [
+      right.indexOf('.'),
+      right.indexOf('!'),
+      right.indexOf('?'),
+      right.indexOf('\n'),
+    ].filter((value) => value >= 0);
+    const rightBoundary = rightCandidates.length ? Math.min(...rightCandidates) : right.length - 1;
+
+    return text.slice(leftBoundary + 1, end + rightBoundary + 1).trim();
+  };
 
   useEffect(() => {
     if (isEditing) return;
@@ -88,17 +129,62 @@ export default function Reader() {
           start,
           end,
           loading: true,
-          mockTranslation: '',
+          translationZh: '',
+          lemma: '',
+          usageNote: '',
+          example: '',
+          note: '',
         });
 
-        // Simulate API call
-        setTimeout(() => {
+        const contextSentence = getContextSentence(articleText, start, end);
+        const cacheKey = getCacheKey(text, contextSentence);
+        const cached = translationCache[cacheKey];
+        if (cached) {
           setPopover((prev) =>
-            prev && prev.text === text && !prev.existingId
-              ? { ...prev, loading: false, mockTranslation: `[Mock 翻译] ${text} 的中文意思` }
+            prev && prev.text === text && prev.start === start && prev.end === end && !prev.existingId
+              ? {
+                  ...prev,
+                  loading: false,
+                  translationZh: cached.translationZh,
+                  lemma: cached.lemma,
+                  usageNote: cached.usageNote,
+                  example: cached.example,
+                  note: cached.note,
+                  error: undefined,
+                }
               : prev
           );
-        }, 300);
+          return;
+        }
+
+        const requestId = ++requestSeqRef.current;
+        void translateHighlight({
+          originalText: text,
+          contextSentence,
+          articleContext: contextSentence,
+        })
+          .then((result) => {
+            if (requestId !== requestSeqRef.current) return;
+            setTranslationCache(cacheKey, result);
+            setPopover((prev) =>
+              prev && prev.text === text && prev.start === start && prev.end === end && !prev.existingId
+                ? { ...prev, loading: false, ...result, error: undefined }
+                : prev
+            );
+          })
+          .catch((error) => {
+            if (requestId !== requestSeqRef.current) return;
+            setPopover((prev) =>
+              prev && prev.text === text && prev.start === start && prev.end === end && !prev.existingId
+                ? {
+                    ...prev,
+                    loading: false,
+                    translationZh: '',
+                    error: error instanceof Error ? error.message : '翻译失败',
+                  }
+                : prev
+            );
+          });
       }
     };
 
@@ -108,7 +194,7 @@ export default function Reader() {
       document.removeEventListener('pointerup', handlePointerUp);
       document.removeEventListener('touchend', handlePointerUp);
     };
-  }, [popover, isEditing]);
+  }, [popover, isEditing, articleText, translationCache, setTranslationCache]);
 
   const handleSaveHighlight = (isImportant: boolean) => {
     if (!popover) return;
@@ -120,11 +206,11 @@ export default function Reader() {
         id: Date.now().toString(),
         originalText: popover.text,
         isImportant,
-        lemma: '',
-        translationZh: popover.mockTranslation,
-        usageNote: '',
-        example: '',
-        note: '',
+        lemma: popover.lemma,
+        translationZh: popover.translationZh,
+        usageNote: popover.usageNote,
+        example: popover.example,
+        note: popover.note,
         start: popover.start,
         end: popover.end,
       });
@@ -166,7 +252,11 @@ export default function Reader() {
         start: highlight.start || 0,
         end: highlight.end || 0,
         loading: false,
-        mockTranslation: highlight.translationZh,
+        translationZh: highlight.translationZh,
+        lemma: highlight.lemma,
+        usageNote: highlight.usageNote,
+        example: highlight.example,
+        note: highlight.note,
         existingId: highlight.id,
         isImportant: highlight.isImportant
       });
@@ -333,7 +423,7 @@ export default function Reader() {
               </div>
             ) : (
               <p className="text-sm text-stone-800 bg-stone-50 p-2 rounded-lg border border-stone-100">
-                {popover.mockTranslation}
+                {popover.translationZh || popover.error || '暂无翻译结果'}
               </p>
             )}
           </div>

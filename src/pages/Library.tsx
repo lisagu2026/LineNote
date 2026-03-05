@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
+import { fetchHealth } from '../lib/api';
 import { Search, Plus, ChevronRight, BookOpen, Star, LayoutGrid, CheckSquare, Square, Download, Trash2, X, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 
 export default function Library() {
@@ -14,6 +15,27 @@ export default function Library() {
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
   const [drawerCardId, setDrawerCardId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'article' | 'card', id: string } | null>(null);
+  const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchHealth()
+      .then(() => {
+        if (!cancelled) {
+          setBackendStatus('connected');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBackendStatus('offline');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Filter Articles
   const filteredArticles = articles.filter((a) =>
@@ -74,6 +96,24 @@ export default function Library() {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-6">
+        <div className="flex justify-end">
+          <div
+            className={`rounded-full px-3 py-1 text-xs font-medium ${
+              backendStatus === 'connected'
+                ? 'bg-emerald-100 text-emerald-700'
+                : backendStatus === 'offline'
+                  ? 'bg-red-100 text-red-700'
+                  : 'bg-stone-200 text-stone-600'
+            }`}
+          >
+            {backendStatus === 'connected'
+              ? '后端已连接'
+              : backendStatus === 'offline'
+                ? '后端未启动'
+                : '检测后端中'}
+          </div>
+        </div>
+
         {/* Search Box */}
         <div className="relative">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">

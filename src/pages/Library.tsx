@@ -67,6 +67,10 @@ export default function Library() {
     });
   };
 
+  const handleExportPdf = () => {
+    window.alert('导出 PDF 功能暂未上线');
+  };
+
   const toggleCardSelection = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     const newSet = new Set(selectedCardIds);
@@ -87,7 +91,7 @@ export default function Library() {
           <span>知识库</span>
         </h1>
         <button
-          onClick={() => navigate('/reader')}
+          onClick={() => navigate('/reader?new=1')}
           className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-full text-sm font-medium transition-colors shadow-sm flex items-center space-x-1"
         >
           <Plus className="w-4 h-4" />
@@ -164,7 +168,10 @@ export default function Library() {
                 <span>仅看重点</span>
               </button>
               {selectedCardIds.size > 0 && (
-                <button className="flex items-center space-x-1 px-3 py-1.5 rounded-full text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm">
+                <button
+                  onClick={handleExportPdf}
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded-full text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm"
+                >
                   <Download className="w-4 h-4" />
                   <span>导出选中 ({selectedCardIds.size})</span>
                 </button>
@@ -185,7 +192,7 @@ export default function Library() {
                 <p className="text-stone-500 mb-4">{searchQuery ? '未找到匹配的文章' : '知识库还是空的，去精读第一篇文章吧！'}</p>
                 {!searchQuery && (
                   <button
-                    onClick={() => navigate('/reader')}
+                    onClick={() => navigate('/reader?new=1')}
                     className="bg-stone-100 hover:bg-stone-200 text-stone-700 px-6 py-2 rounded-full text-sm font-medium transition-colors"
                   >
                     开始精读

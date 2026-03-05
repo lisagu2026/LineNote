@@ -30,12 +30,26 @@ export interface AnalyzeArticleResult {
   cards: Array<Pick<ApiCard, 'originalText' | 'lemma' | 'translationZh' | 'usageNote' | 'example' | 'note' | 'isImportant'>>;
 }
 
+export interface SummarizeArticleResult {
+  learningPoints: string[];
+  fullTranslationZh: string;
+}
+
 export interface TranslateHighlightResult {
   translationZh: string;
   lemma: string;
   usageNote: string;
   example: string;
   note: string;
+  cacheHit?: boolean;
+}
+
+export interface EnrichHighlightResult {
+  lemma: string;
+  usageNote: string;
+  example: string;
+  note: string;
+  cacheHit?: boolean;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -79,6 +93,18 @@ export async function createArticle(article: ApiArticle) {
   return (await parseJsonResponse(response)) as ApiArticle;
 }
 
+export async function updateArticle(articleId: string, article: ApiArticle) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(article),
+  });
+
+  return (await parseJsonResponse(response)) as ApiArticle;
+}
+
 export async function analyzeArticle(input: {
   title: string;
   content: string;
@@ -95,6 +121,18 @@ export async function analyzeArticle(input: {
   return (await parseJsonResponse(response)) as AnalyzeArticleResult;
 }
 
+export async function summarizeArticle(input: {title: string; content: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/summarize`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return (await parseJsonResponse(response)) as SummarizeArticleResult;
+}
+
 export async function translateHighlight(input: {
   originalText: string;
   contextSentence?: string;
@@ -109,4 +147,73 @@ export async function translateHighlight(input: {
   });
 
   return (await parseJsonResponse(response)) as TranslateHighlightResult;
+}
+
+export async function enrichHighlight(input: {
+  originalText: string;
+  contextSentence?: string;
+  translationZh?: string;
+}) {
+  const response = await fetch(`${API_BASE_URL}/api/highlights/enrich`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return (await parseJsonResponse(response)) as EnrichHighlightResult;
+}
+
+export async function preprocessArticle(input: {content: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/preprocess`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return parseJsonResponse(response);
+}
+
+export async function getSentenceTranslations(input: {content: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/sentence-translations`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return (await parseJsonResponse(response)) as {items: Array<{source: string; translationZh: string}>; missingCount: number};
+}
+
+export async function getSentenceTranslationsCached(input: {content: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/sentence-translations`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({...input, cachedOnly: true}),
+  });
+
+  return (await parseJsonResponse(response)) as {items: Array<{source: string; translationZh: string}>; missingCount: number};
+}
+
+export async function getPreprocessStatus(input: {content: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/preprocess-status`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return (await parseJsonResponse(response)) as {
+    totalCount: number;
+    cachedCount: number;
+    inProgress: boolean;
+    done: boolean;
+  };
 }

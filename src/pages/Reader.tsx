@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { translateHighlight } from '../lib/api';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { enrichHighlight, getPreprocessStatus, preprocessArticle, translateHighlight } from '../lib/api';
 import { useStore } from '../store';
 import { ChevronLeft, Star, Trash2, Edit3, BookOpen } from 'lucide-react';
 
@@ -8,11 +8,14 @@ const MOCK_ARTICLE = `Вчера я гулял по парку и увидел �
 
 export default function Reader() {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     articleTitle,
     articleText,
     setArticle,
+    setActiveArticleId,
     highlights,
+    clearHighlights,
     addHighlight,
     removeHighlight,
     updateHighlight,
@@ -42,9 +45,34 @@ export default function Reader() {
     existingId?: string;
     isImportant?: boolean;
   } | null>(null);
+  const [preprocessStatus, setPreprocessStatus] = useState<{
+    phase: 'idle' | 'running' | 'done' | 'error';
+    cachedCount: number;
+    totalCount: number;
+  }>({
+    phase: 'idle',
+    cachedCount: 0,
+    totalCount: 0,
+  });
   
   const contentRef = useRef<HTMLDivElement>(null);
-  const requestSeqRef = useRef(0);
+  const preprocessTimerRef = useRef<number | null>(null);
+  const isResumeMode = new URLSearchParams(location.search).get('resume') === '1';
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('new') !== '1') {
+      return;
+    }
+
+    setArticle('', '');
+    setActiveArticleId(null);
+    clearHighlights();
+    setTitleInput('俄语精读：新文章');
+    setTextInput('');
+    setIsEditing(true);
+    setPopover(null);
+  }, [location.search, clearHighlights, setArticle]);
 
   const getCacheKey = (originalText: string, contextSentence: string) => {
     return `${originalText}::${contextSentence}`.toLowerCase();
@@ -70,6 +98,68 @@ export default function Reader() {
     return text.slice(leftBoundary + 1, end + rightBoundary + 1).trim();
   };
 
+  const clearPreprocessTimer = () => {
+    if (preprocessTimerRef.current) {
+      window.clearTimeout(preprocessTimerRef.current);
+      preprocessTimerRef.current = null;
+    }
+  };
+
+  const monitorPreprocessProgress = (content: string, round = 0) => {
+    if (!content.trim()) {
+      return;
+    }
+
+    void getPreprocessStatus({content})
+      .then((status) => {
+        setPreprocessStatus({
+          phase: status.done ? 'done' : 'running',
+          cachedCount: status.cachedCount,
+          totalCount: status.totalCount,
+        });
+
+        if (!status.done && round < 60) {
+          preprocessTimerRef.current = window.setTimeout(() => {
+            monitorPreprocessProgress(content, round + 1);
+          }, 1500);
+        }
+      })
+      .catch(() => {
+        setPreprocessStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+        }));
+      });
+  };
+
+  const triggerPreprocess = (content: string) => {
+    if (!content.trim()) {
+      return;
+    }
+    clearPreprocessTimer();
+    setPreprocessStatus({phase: 'running', cachedCount: 0, totalCount: 0});
+    void preprocessArticle({content})
+      .then(() => {
+        monitorPreprocessProgress(content, 0);
+      })
+      .catch(() => {
+        setPreprocessStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+        }));
+      });
+  };
+
+  useEffect(() => {
+    if (!isEditing && articleText.trim()) {
+      monitorPreprocessProgress(articleText, 0);
+    }
+
+    return () => {
+      clearPreprocessTimer();
+    };
+  }, [isEditing, articleText]);
+
   useEffect(() => {
     if (isEditing) return;
 
@@ -88,19 +178,29 @@ export default function Reader() {
         return;
       }
 
-      const text = selection.toString().trim();
-      if (!text) return;
-
       // Ensure selection is within our content
-      if (contentRef.current && contentRef.current.contains(selection.anchorNode)) {
+      if (
+        contentRef.current &&
+        contentRef.current.contains(selection.anchorNode) &&
+        contentRef.current.contains(selection.focusNode)
+      ) {
         const range = selection.getRangeAt(0);
+        const rawSelectedText = range.toString();
+        const text = rawSelectedText.trim();
+        if (!text) return;
         
         // Calculate character offset
         const preSelectionRange = range.cloneRange();
         preSelectionRange.selectNodeContents(contentRef.current);
         preSelectionRange.setEnd(range.startContainer, range.startOffset);
-        const start = preSelectionRange.toString().length;
-        const end = start + range.toString().length;
+        let start = preSelectionRange.toString().length;
+        let end = start + rawSelectedText.length;
+
+        // Keep offsets aligned with trimmed text shown in popover/cards.
+        const leadingWhitespace = rawSelectedText.length - rawSelectedText.trimStart().length;
+        const trailingWhitespace = rawSelectedText.length - rawSelectedText.trimEnd().length;
+        start += leadingWhitespace;
+        end -= trailingWhitespace;
 
         const rect = range.getBoundingClientRect();
 
@@ -128,63 +228,13 @@ export default function Reader() {
           text,
           start,
           end,
-          loading: true,
+          loading: false,
           translationZh: '',
           lemma: '',
           usageNote: '',
           example: '',
           note: '',
         });
-
-        const contextSentence = getContextSentence(articleText, start, end);
-        const cacheKey = getCacheKey(text, contextSentence);
-        const cached = translationCache[cacheKey];
-        if (cached) {
-          setPopover((prev) =>
-            prev && prev.text === text && prev.start === start && prev.end === end && !prev.existingId
-              ? {
-                  ...prev,
-                  loading: false,
-                  translationZh: cached.translationZh,
-                  lemma: cached.lemma,
-                  usageNote: cached.usageNote,
-                  example: cached.example,
-                  note: cached.note,
-                  error: undefined,
-                }
-              : prev
-          );
-          return;
-        }
-
-        const requestId = ++requestSeqRef.current;
-        void translateHighlight({
-          originalText: text,
-          contextSentence,
-          articleContext: contextSentence,
-        })
-          .then((result) => {
-            if (requestId !== requestSeqRef.current) return;
-            setTranslationCache(cacheKey, result);
-            setPopover((prev) =>
-              prev && prev.text === text && prev.start === start && prev.end === end && !prev.existingId
-                ? { ...prev, loading: false, ...result, error: undefined }
-                : prev
-            );
-          })
-          .catch((error) => {
-            if (requestId !== requestSeqRef.current) return;
-            setPopover((prev) =>
-              prev && prev.text === text && prev.start === start && prev.end === end && !prev.existingId
-                ? {
-                    ...prev,
-                    loading: false,
-                    translationZh: '',
-                    error: error instanceof Error ? error.message : '翻译失败',
-                  }
-                : prev
-            );
-          });
       }
     };
 
@@ -194,30 +244,157 @@ export default function Reader() {
       document.removeEventListener('pointerup', handlePointerUp);
       document.removeEventListener('touchend', handlePointerUp);
     };
-  }, [popover, isEditing, articleText, translationCache, setTranslationCache]);
+  }, [popover, isEditing, articleText]);
 
-  const handleSaveHighlight = (isImportant: boolean) => {
+  const handleSaveHighlight = async (isImportant: boolean) => {
     if (!popover) return;
+
+    const contextSentence = getContextSentence(articleText, popover.start, popover.end);
+    const cacheKey = getCacheKey(popover.text, contextSentence);
+    const triggerDetailEnrichment = (highlightId: string, translationZh: string) => {
+      void enrichHighlight({
+        originalText: popover.text,
+        contextSentence,
+        translationZh,
+      })
+        .then((detail) => {
+          if (detail.lemma || detail.usageNote || detail.example || detail.note) {
+            updateHighlight(highlightId, {
+              lemma: detail.lemma,
+              usageNote: detail.usageNote,
+              example: detail.example,
+              note: detail.note,
+            });
+            setTranslationCache(cacheKey, {
+              translationZh,
+              lemma: detail.lemma,
+              usageNote: detail.usageNote,
+              example: detail.example,
+              note: detail.note,
+            });
+            setPopover((prev) =>
+              prev && prev.existingId === highlightId
+                ? {
+                    ...prev,
+                    lemma: detail.lemma,
+                    usageNote: detail.usageNote,
+                    example: detail.example,
+                    note: detail.note,
+                  }
+                : prev
+            );
+          }
+        })
+        .catch(() => {});
+    };
+
+    const cached = translationCache[cacheKey];
+    if (cached) {
+      const exists = highlights.find(h => h.start === popover.start && h.end === popover.end);
+      let highlightId = exists?.id;
+      if (!exists) {
+        highlightId = Date.now().toString();
+        addHighlight({
+          id: highlightId,
+          originalText: popover.text,
+          isImportant,
+          lemma: cached.lemma,
+          translationZh: cached.translationZh,
+          usageNote: cached.usageNote,
+          example: cached.example,
+          note: cached.note,
+          start: popover.start,
+          end: popover.end,
+        });
+      } else if (exists.isImportant !== isImportant) {
+        updateHighlight(exists.id, {isImportant});
+      }
+      window.getSelection()?.removeAllRanges();
+      setPopover((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              existingId: highlightId,
+              isImportant,
+              translationZh: cached.translationZh,
+              lemma: cached.lemma,
+              usageNote: cached.usageNote,
+              example: cached.example,
+              note: cached.note,
+              error: undefined,
+            }
+          : prev
+      );
+      if (highlightId) {
+        triggerDetailEnrichment(highlightId, cached.translationZh);
+      }
+      return;
+    }
+
+    setPopover((prev) => (prev ? {...prev, loading: true, error: undefined} : prev));
+    let result;
+    try {
+      result = await translateHighlight({
+        originalText: popover.text,
+        contextSentence,
+        articleContext: contextSentence,
+      });
+      setTranslationCache(cacheKey, result);
+    } catch (error) {
+      setPopover((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              error: error instanceof Error ? error.message : '翻译失败',
+            }
+          : prev
+      );
+      return;
+    }
     
     // Check if already highlighted (by exact offset)
     const exists = highlights.find(h => h.start === popover.start && h.end === popover.end);
+    let highlightId = exists?.id;
     if (!exists) {
+      highlightId = Date.now().toString();
       addHighlight({
-        id: Date.now().toString(),
+        id: highlightId,
         originalText: popover.text,
         isImportant,
-        lemma: popover.lemma,
-        translationZh: popover.translationZh,
-        usageNote: popover.usageNote,
-        example: popover.example,
-        note: popover.note,
+        lemma: result.lemma,
+        translationZh: result.translationZh,
+        usageNote: result.usageNote,
+        example: result.example,
+        note: result.note,
         start: popover.start,
         end: popover.end,
       });
+    } else if (exists.isImportant !== isImportant) {
+      updateHighlight(exists.id, {isImportant});
     }
     
     window.getSelection()?.removeAllRanges();
-    setPopover(null);
+    setPopover((prev) =>
+      prev
+        ? {
+            ...prev,
+            loading: false,
+            existingId: highlightId,
+            isImportant,
+            translationZh: result.translationZh,
+            lemma: result.lemma,
+            usageNote: result.usageNote,
+            example: result.example,
+            note: result.note,
+            error: undefined,
+          }
+        : prev
+    );
+    if (highlightId) {
+      triggerDetailEnrichment(highlightId, result.translationZh);
+    }
   };
 
   const handleMarkClick = (e: React.MouseEvent, id: string) => {
@@ -267,6 +444,7 @@ export default function Reader() {
   const handleStartReading = () => {
     if (!textInput.trim()) return;
     setArticle(titleInput || '未命名文章', textInput);
+    triggerPreprocess(textInput);
     setIsEditing(false);
   };
 
@@ -311,7 +489,7 @@ export default function Reader() {
           onClick={(e) => handleMarkClick(e, h.id)}
         >
           {text.slice(h.start, h.end)}
-          {h.isImportant && <span className="text-amber-500 text-xs ml-1 pointer-events-none">⭐</span>}
+          {h.isImportant && <Star className="inline w-3 h-3 ml-1 text-amber-500 fill-amber-500 align-[-1px] pointer-events-none" />}
         </mark>
       );
       lastIndex = h.end;
@@ -391,12 +569,31 @@ export default function Reader() {
             <Edit3 className="w-4 h-4" />
           </button>
         </div>
+        <div className="flex items-center gap-3">
+          {preprocessStatus.phase !== 'idle' && (
+            <div
+              className={`text-xs px-3 py-1 rounded-full ${
+                preprocessStatus.phase === 'done'
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : preprocessStatus.phase === 'error'
+                    ? 'bg-red-100 text-red-700'
+                    : 'bg-blue-100 text-blue-700'
+              }`}
+            >
+              {preprocessStatus.phase === 'done'
+                ? '已完成预翻译'
+                : preprocessStatus.phase === 'error'
+                  ? '预翻译状态获取失败'
+                  : `预翻译中 ${preprocessStatus.cachedCount}/${preprocessStatus.totalCount || '?'}`}
+            </div>
+          )}
         <button
-          onClick={() => navigate('/confirm')}
+          onClick={() => navigate(isResumeMode ? '/summary?resume=1' : '/confirm')}
           className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-full text-sm font-medium transition-colors shadow-sm"
         >
           完成本篇精读
         </button>
+        </div>
       </header>
 
       {/* Content */}
@@ -423,7 +620,7 @@ export default function Reader() {
               </div>
             ) : (
               <p className="text-sm text-stone-800 bg-stone-50 p-2 rounded-lg border border-stone-100">
-                {popover.translationZh || popover.error || '暂无翻译结果'}
+                {popover.translationZh || popover.error || '点击“保存划线”后即时翻译'}
               </p>
             )}
           </div>
@@ -459,14 +656,14 @@ export default function Reader() {
             ) : (
               <>
                 <button
-                  onClick={() => handleSaveHighlight(false)}
+                  onClick={() => void handleSaveHighlight(false)}
                   disabled={popover.loading}
                   className="flex-1 bg-stone-100 hover:bg-stone-200 text-stone-700 py-2 px-3 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
                 >
                   保存划线
                 </button>
                 <button
-                  onClick={() => handleSaveHighlight(true)}
+                  onClick={() => void handleSaveHighlight(true)}
                   disabled={popover.loading}
                   className="flex-1 bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 py-2 px-3 rounded-lg text-xs font-medium flex items-center justify-center space-x-1 transition-colors disabled:opacity-50"
                 >

@@ -76,6 +76,12 @@ export async function listArticles() {
   return payload.items as ApiArticle[];
 }
 
+export async function listArticlesWithCards() {
+  const response = await fetch(`${API_BASE_URL}/api/articles?includeCards=1`);
+  const payload = await parseJsonResponse(response);
+  return payload.items as ApiArticle[];
+}
+
 export async function getArticle(articleId: string) {
   const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`);
   return (await parseJsonResponse(response)) as ApiArticle;
@@ -103,6 +109,38 @@ export async function updateArticle(articleId: string, article: ApiArticle) {
   });
 
   return (await parseJsonResponse(response)) as ApiArticle;
+}
+
+export async function deleteArticle(articleId: string) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    await parseJsonResponse(response);
+  }
+}
+
+export async function updateCard(cardId: string, card: Partial<ApiCard>) {
+  const response = await fetch(`${API_BASE_URL}/api/cards/${cardId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(card),
+  });
+
+  return (await parseJsonResponse(response)) as ApiCard;
+}
+
+export async function deleteCard(cardId: string) {
+  const response = await fetch(`${API_BASE_URL}/api/cards/${cardId}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    await parseJsonResponse(response);
+  }
 }
 
 export async function analyzeArticle(input: {

@@ -139,6 +139,42 @@ const deleteArticleStmt = db.prepare(`
   DELETE FROM articles WHERE id = ?
 `);
 
+const deleteCardStmt = db.prepare(`
+  DELETE FROM cards WHERE id = ?
+`);
+
+const updateCardStmt = db.prepare(`
+  UPDATE cards
+  SET
+    is_important = ?,
+    lemma = ?,
+    translation_zh = ?,
+    usage_note = ?,
+    example = ?,
+    note = ?,
+    start_offset = ?,
+    end_offset = ?
+  WHERE id = ?
+`);
+
+const selectCardByIdStmt = db.prepare(`
+  SELECT
+    id,
+    article_id,
+    original_text,
+    is_important,
+    lemma,
+    translation_zh,
+    usage_note,
+    example,
+    note,
+    start_offset,
+    end_offset,
+    created_at
+  FROM cards
+  WHERE id = ?
+`);
+
 const selectTranslationCacheStmt = db.prepare(`
   SELECT
     cache_key,
@@ -355,6 +391,38 @@ export function upsertArticle(input) {
 
   upsertArticleWithCards(article, cards);
   return getArticleById(article.id);
+}
+
+export function deleteArticleById(articleId) {
+  const result = deleteArticleStmt.run(articleId);
+  return result.changes > 0;
+}
+
+export function deleteCardById(cardId) {
+  const result = deleteCardStmt.run(cardId);
+  return result.changes > 0;
+}
+
+export function updateCardById(cardId, updates = {}) {
+  const current = selectCardByIdStmt.get(cardId);
+  if (!current) {
+    return null;
+  }
+
+  updateCardStmt.run(
+    updates.isImportant !== undefined ? (updates.isImportant ? 1 : 0) : current.is_important,
+    updates.lemma ?? current.lemma,
+    updates.translationZh ?? current.translation_zh,
+    updates.usageNote ?? current.usage_note,
+    updates.example ?? current.example,
+    updates.note ?? current.note,
+    updates.start ?? current.start_offset,
+    updates.end ?? current.end_offset,
+    cardId,
+  );
+
+  const updated = selectCardByIdStmt.get(cardId);
+  return updated ? mapCardRow(updated) : null;
 }
 
 function normalizeCachePart(value) {

@@ -69,6 +69,7 @@ interface AppState {
   // Library State
   articles: Article[];
   cards: Card[];
+  replaceLibraryData: (articles: Article[], cards: Card[]) => void;
   saveToLibrary: (article: Article, cards: Card[]) => void;
   updateCard: (id: string, updates: Partial<Card>) => void;
   removeArticle: (id: string) => void;
@@ -122,6 +123,7 @@ export const useStore = create<AppState>()(
       
       articles: [],
       cards: [],
+      replaceLibraryData: (articles, cards) => set({articles, cards}),
       saveToLibrary: (article, newCards) =>
         set((state) => ({
           articles: [article, ...state.articles.filter((a) => a.id !== article.id)],

@@ -12,6 +12,7 @@ export default function Summary() {
     activeArticleId,
     setActiveArticleId,
     articles,
+    cards,
     highlights,
     removeHighlight,
     replaceHighlights,
@@ -35,10 +36,6 @@ export default function Summary() {
   const [deleteCardId, setDeleteCardId] = useState<string | null>(null);
   const hasAnalyzedRef = useRef(false);
   const pollingTimerRef = useRef<number | null>(null);
-
-  function handleExportPdf() {
-    window.alert('导出 PDF 功能暂未上线');
-  }
 
   useEffect(() => {
     if (hasAnalyzedRef.current) {
@@ -131,10 +128,23 @@ export default function Summary() {
           fullTranslationZh: result.fullTranslationZh,
         });
         replaceHighlights(
-          highlights.map((highlight, index) => ({
-            ...highlight,
-            ...result.cards[index],
-          })),
+          highlights.map((highlight, index) => {
+            const aiCard = result.cards[index];
+            if (!aiCard) {
+              return highlight;
+            }
+
+            return {
+              ...highlight,
+              // Keep user-edited fields; only fill missing values from AI.
+              translationZh: highlight.translationZh || aiCard.translationZh,
+              lemma: highlight.lemma || aiCard.lemma,
+              usageNote: highlight.usageNote || aiCard.usageNote,
+              example: highlight.example || aiCard.example,
+              note: highlight.note || aiCard.note,
+              isImportant: highlight.isImportant,
+            };
+          }),
         );
       }
 
@@ -194,12 +204,24 @@ export default function Summary() {
       createdAt,
     };
 
-    const newCards: Card[] = highlights.map((h) => ({
-      ...h,
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      articleId,
-      createdAt,
-    }));
+    const currentHighlightIds = new Set(highlights.map((item) => item.id));
+    const usedIds = new Set<string>(
+      cards.map((card) => card.id).filter((id) => !currentHighlightIds.has(id)),
+    );
+    const newCards: Card[] = highlights.map((h, index) => {
+      let nextId = h.id || `${articleId}-${index}`;
+      while (usedIds.has(nextId)) {
+        nextId = `${nextId}-${Math.random().toString(36).slice(2, 6)}`;
+      }
+      usedIds.add(nextId);
+
+      return {
+        ...h,
+        id: nextId,
+        articleId,
+        createdAt,
+      };
+    });
 
     try {
       if (activeArticleId) {
@@ -239,11 +261,12 @@ export default function Summary() {
         </div>
         <div className="flex items-center space-x-2">
           <button
-            onClick={handleExportPdf}
-            className="bg-stone-100 hover:bg-stone-200 text-stone-700 px-4 py-2 rounded-full text-sm font-medium transition-colors hidden sm:flex items-center space-x-2"
+            disabled
+            title="即将上线"
+            className="bg-stone-100 text-stone-400 px-4 py-2 rounded-full text-sm font-medium hidden sm:flex items-center space-x-2 cursor-not-allowed"
           >
             <Download className="w-4 h-4" />
-            <span>导出 PDF</span>
+            <span>导出 PDF（即将上线）</span>
           </button>
           <button
             onClick={handleSaveToLibrary}

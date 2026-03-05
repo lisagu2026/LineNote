@@ -4,8 +4,6 @@ import { enrichHighlight, getPreprocessStatus, preprocessArticle, translateHighl
 import { useStore } from '../store';
 import { ChevronLeft, Star, Trash2, Edit3, BookOpen } from 'lucide-react';
 
-const MOCK_ARTICLE = `Вчера я гулял по парку и увидел красивую птицу. Она сидела на ветке и пела песню. Погода была замечательная, светило солнце, и дул легкий ветерок. Я решил сесть на скамейку и почитать книгу. Это был один из тех дней, когда хочется просто наслаждаться моментом и никуда не спешить. Вдруг ко мне подошел маленький мальчик и спросил, который час. Я улыбнулся и ответил ему. Такие простые моменты делают нашу жизнь по-настоящему счастливой.`;
-
 export default function Reader() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -25,7 +23,7 @@ export default function Reader() {
   
   const [isEditing, setIsEditing] = useState(!articleText);
   const [titleInput, setTitleInput] = useState(articleTitle || '俄语精读：公园散步');
-  const [textInput, setTextInput] = useState(articleText || MOCK_ARTICLE);
+  const [textInput, setTextInput] = useState(articleText || '');
 
   const [popover, setPopover] = useState<{
     visible: boolean;
@@ -44,6 +42,7 @@ export default function Reader() {
     error?: string;
     existingId?: string;
     isImportant?: boolean;
+    overlapIds?: string[];
   } | null>(null);
   const [preprocessStatus, setPreprocessStatus] = useState<{
     phase: 'idle' | 'running' | 'done' | 'error';
@@ -58,6 +57,13 @@ export default function Reader() {
   const contentRef = useRef<HTMLDivElement>(null);
   const preprocessTimerRef = useRef<number | null>(null);
   const isResumeMode = new URLSearchParams(location.search).get('resume') === '1';
+
+  const createHighlightId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -249,6 +255,24 @@ export default function Reader() {
   const handleSaveHighlight = async (isImportant: boolean) => {
     if (!popover) return;
 
+    const overlapHighlights = highlights.filter(
+      (item) =>
+        !(popover.end <= item.start || popover.start >= item.end) &&
+        !(popover.start === item.start && popover.end === item.end),
+    );
+    if (overlapHighlights.length > 0) {
+      setPopover((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              error: '该划线与已有划线重叠，请先删除冲突划线后再保存。',
+            }
+          : prev,
+      );
+      return;
+    }
+
     const contextSentence = getContextSentence(articleText, popover.start, popover.end);
     const cacheKey = getCacheKey(popover.text, contextSentence);
     const triggerDetailEnrichment = (highlightId: string, translationZh: string) => {
@@ -293,7 +317,7 @@ export default function Reader() {
       const exists = highlights.find(h => h.start === popover.start && h.end === popover.end);
       let highlightId = exists?.id;
       if (!exists) {
-        highlightId = Date.now().toString();
+        highlightId = createHighlightId();
         addHighlight({
           id: highlightId,
           originalText: popover.text,
@@ -358,7 +382,7 @@ export default function Reader() {
     const exists = highlights.find(h => h.start === popover.start && h.end === popover.end);
     let highlightId = exists?.id;
     if (!exists) {
-      highlightId = Date.now().toString();
+      highlightId = createHighlightId();
       addHighlight({
         id: highlightId,
         originalText: popover.text,
@@ -397,48 +421,80 @@ export default function Reader() {
     }
   };
 
-  const handleMarkClick = (e: React.MouseEvent, id: string) => {
+  const handleMarkClick = (
+    e: React.MouseEvent,
+    mark: {
+      id: string;
+      start: number;
+      end: number;
+      isImportant: boolean;
+      sourceIds: string[];
+    },
+  ) => {
     e.stopPropagation();
-    const highlight = highlights.find(h => h.id === id);
-    
-    if (highlight) {
-      const target = e.currentTarget as HTMLElement;
-      const rect = target.getBoundingClientRect();
-      
-      let x = rect.left + rect.width / 2;
-      let y = rect.top - 10;
-      let isAbove = true;
+    const target = e.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
 
-      const popoverWidth = 256;
-      const popoverHeight = 160;
+    let x = rect.left + rect.width / 2;
+    let y = rect.top - 10;
+    let isAbove = true;
 
-      if (x - popoverWidth / 2 < 10) x = popoverWidth / 2 + 10;
-      if (x + popoverWidth / 2 > window.innerWidth - 10) x = window.innerWidth - popoverWidth / 2 - 10;
+    const popoverWidth = 256;
+    const popoverHeight = 160;
 
-      if (y - popoverHeight < 0) {
-        y = rect.bottom + 10;
-        isAbove = false;
-      }
+    if (x - popoverWidth / 2 < 10) x = popoverWidth / 2 + 10;
+    if (x + popoverWidth / 2 > window.innerWidth - 10) x = window.innerWidth - popoverWidth / 2 - 10;
 
+    if (y - popoverHeight < 0) {
+      y = rect.bottom + 10;
+      isAbove = false;
+    }
+
+    if (mark.sourceIds.length > 1) {
       setPopover({
         visible: true,
         x,
         y,
         isAbove,
-        text: highlight.originalText,
-        start: highlight.start || 0,
-        end: highlight.end || 0,
+        text: articleText.slice(mark.start, mark.end),
+        start: mark.start,
+        end: mark.end,
         loading: false,
-        translationZh: highlight.translationZh,
-        lemma: highlight.lemma,
-        usageNote: highlight.usageNote,
-        example: highlight.example,
-        note: highlight.note,
-        existingId: highlight.id,
-        isImportant: highlight.isImportant
+        translationZh: '',
+        lemma: '',
+        usageNote: '',
+        example: '',
+        note: '',
+        error: '检测到历史重叠划线，请先清理重叠后再编辑。',
+        overlapIds: mark.sourceIds,
       });
       window.getSelection()?.removeAllRanges();
+      return;
     }
+
+    const highlight = highlights.find((h) => h.id === mark.id);
+    if (!highlight) {
+      return;
+    }
+
+    setPopover({
+      visible: true,
+      x,
+      y,
+      isAbove,
+      text: highlight.originalText,
+      start: highlight.start || 0,
+      end: highlight.end || 0,
+      loading: false,
+      translationZh: highlight.translationZh,
+      lemma: highlight.lemma,
+      usageNote: highlight.usageNote,
+      example: highlight.example,
+      note: highlight.note,
+      existingId: highlight.id,
+      isImportant: highlight.isImportant
+    });
+    window.getSelection()?.removeAllRanges();
   };
 
   const handleStartReading = () => {
@@ -458,17 +514,36 @@ export default function Reader() {
     const sorted = [...validHighlights].sort((a, b) => a.start - b.start);
 
     // Merge overlaps
-    const merged: (typeof highlights[0])[] = [];
+    const merged: Array<{
+      id: string;
+      start: number;
+      end: number;
+      isImportant: boolean;
+      sourceIds: string[];
+    }> = [];
     for (const h of sorted) {
       if (!merged.length) {
-        merged.push({ ...h });
+        merged.push({
+          id: h.id,
+          start: h.start,
+          end: h.end,
+          isImportant: h.isImportant,
+          sourceIds: [h.id],
+        });
       } else {
         const last = merged[merged.length - 1];
         if (h.start < last.end) {
           last.end = Math.max(last.end, h.end);
           last.isImportant = last.isImportant || h.isImportant;
+          last.sourceIds.push(h.id);
         } else {
-          merged.push({ ...h });
+          merged.push({
+            id: h.id,
+            start: h.start,
+            end: h.end,
+            isImportant: h.isImportant,
+            sourceIds: [h.id],
+          });
         }
       }
     }
@@ -486,7 +561,7 @@ export default function Reader() {
           key={`mark-${h.id}`}
           data-id={h.id}
           className={`${bgClass} rounded px-1 text-gray-900 cursor-pointer transition-colors hover:brightness-95`}
-          onClick={(e) => handleMarkClick(e, h.id)}
+          onClick={(e) => handleMarkClick(e, h)}
         >
           {text.slice(h.start, h.end)}
           {h.isImportant && <Star className="inline w-3 h-3 ml-1 text-amber-500 fill-amber-500 align-[-1px] pointer-events-none" />}
@@ -653,6 +728,18 @@ export default function Reader() {
                   <span>{popover.isImportant ? '取消重点' : '标为重点'}</span>
                 </button>
               </>
+            ) : popover.overlapIds?.length ? (
+              <button
+                onClick={() => {
+                  for (const id of popover.overlapIds ?? []) {
+                    removeHighlight(id);
+                  }
+                  setPopover(null);
+                }}
+                className="w-full bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 py-2 px-3 rounded-lg text-xs font-medium transition-colors"
+              >
+                清理重叠划线 ({popover.overlapIds.length})
+              </button>
             ) : (
               <>
                 <button

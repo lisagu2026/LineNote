@@ -11,6 +11,8 @@ import {
   buildSentenceCacheKey,
   buildTranslationCacheKey,
   createArticle,
+  deleteArticleById,
+  deleteCardById,
   dbPath,
   getArticleById,
   getCachedTranslation,
@@ -18,6 +20,7 @@ import {
   listArticles,
   setCachedSentenceTranslation,
   setCachedTranslation,
+  updateCardById,
   upsertArticle,
 } from './db.js';
 
@@ -60,7 +63,7 @@ async function preprocessArticleTranslations(content) {
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
 
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -81,8 +84,17 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.get('/api/articles', (_req, res) => {
-  res.json({items: listArticles()});
+app.get('/api/articles', (req, res) => {
+  const includeCards = req.query.includeCards === '1';
+  const items = listArticles();
+
+  if (!includeCards) {
+    res.json({items});
+    return;
+  }
+
+  const withCards = items.map((item) => getArticleById(item.id)).filter(Boolean);
+  res.json({items: withCards});
 });
 
 app.get('/api/articles/:id', (req, res) => {
@@ -133,6 +145,48 @@ app.put('/api/articles/:id', (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({error: 'Failed to upsert article'});
+  }
+});
+
+app.delete('/api/articles/:id', (req, res) => {
+  try {
+    const deleted = deleteArticleById(req.params.id);
+    if (!deleted) {
+      res.status(404).json({error: 'Article not found'});
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: 'Failed to delete article'});
+  }
+});
+
+app.patch('/api/cards/:id', (req, res) => {
+  try {
+    const card = updateCardById(req.params.id, req.body ?? {});
+    if (!card) {
+      res.status(404).json({error: 'Card not found'});
+      return;
+    }
+    res.json(card);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: 'Failed to update card'});
+  }
+});
+
+app.delete('/api/cards/:id', (req, res) => {
+  try {
+    const deleted = deleteCardById(req.params.id);
+    if (!deleted) {
+      res.status(404).json({error: 'Card not found'});
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: 'Failed to delete card'});
   }
 });
 

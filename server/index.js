@@ -8,16 +8,22 @@ import {
   translateSentenceWithDeepSeek,
 } from './deepseek.js';
 import {
+  buildSummaryCacheKey,
   buildSentenceCacheKey,
   buildTranslationCacheKey,
   createArticle,
+  deleteArticleById,
+  deleteCardById,
   dbPath,
   getArticleById,
+  getCachedSummary,
   getCachedTranslation,
   getCachedSentenceTranslation,
   listArticles,
+  setCachedSummary,
   setCachedSentenceTranslation,
   setCachedTranslation,
+  updateCardById,
   upsertArticle,
 } from './db.js';
 
@@ -28,6 +34,11 @@ const app = express();
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8787);
 const preprocessingJobs = new Map();
+
+function sendSseEvent(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
 
 function splitSentences(text) {
   return String(text ?? '')
@@ -60,7 +71,7 @@ async function preprocessArticleTranslations(content) {
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
 
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -81,8 +92,17 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.get('/api/articles', (_req, res) => {
-  res.json({items: listArticles()});
+app.get('/api/articles', (req, res) => {
+  const includeCards = req.query.includeCards === '1';
+  const items = listArticles();
+
+  if (!includeCards) {
+    res.json({items});
+    return;
+  }
+
+  const withCards = items.map((item) => getArticleById(item.id)).filter(Boolean);
+  res.json({items: withCards});
 });
 
 app.get('/api/articles/:id', (req, res) => {
@@ -136,8 +156,50 @@ app.put('/api/articles/:id', (req, res) => {
   }
 });
 
+app.delete('/api/articles/:id', (req, res) => {
+  try {
+    const deleted = deleteArticleById(req.params.id);
+    if (!deleted) {
+      res.status(404).json({error: 'Article not found'});
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: 'Failed to delete article'});
+  }
+});
+
+app.patch('/api/cards/:id', (req, res) => {
+  try {
+    const card = updateCardById(req.params.id, req.body ?? {});
+    if (!card) {
+      res.status(404).json({error: 'Card not found'});
+      return;
+    }
+    res.json(card);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: 'Failed to update card'});
+  }
+});
+
+app.delete('/api/cards/:id', (req, res) => {
+  try {
+    const deleted = deleteCardById(req.params.id);
+    if (!deleted) {
+      res.status(404).json({error: 'Card not found'});
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: 'Failed to delete card'});
+  }
+});
+
 app.post('/api/articles/analyze', async (req, res) => {
-  const {title, content, highlights} = req.body ?? {};
+  const {title, content, highlights, force} = req.body ?? {};
 
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
@@ -150,8 +212,33 @@ app.post('/api/articles/analyze', async (req, res) => {
   }
 
   try {
+    const cacheKey = buildSummaryCacheKey({
+      mode: 'analyze',
+      title,
+      content,
+      highlights,
+    });
+    if (!force) {
+      const cached = getCachedSummary(cacheKey);
+      if (cached?.payload) {
+        res.json({
+          ...cached.payload,
+          cacheHit: true,
+        });
+        return;
+      }
+    }
+
     const result = await analyzeArticleWithDeepSeek({title, content, highlights});
-    res.json(result);
+    setCachedSummary({
+      cacheKey,
+      mode: 'analyze',
+      payload: result,
+    });
+    res.json({
+      ...result,
+      cacheHit: false,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'DeepSeek analysis failed';
     const status = message === 'DEEPSEEK_API_KEY is not configured' ? 503 : 502;
@@ -160,19 +247,174 @@ app.post('/api/articles/analyze', async (req, res) => {
 });
 
 app.post('/api/articles/summarize', async (req, res) => {
-  const {title, content} = req.body ?? {};
+  const {title, content, highlights, previousLearningPoints, regenerateRequestId, force} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
     return;
   }
+  if (highlights != null && !Array.isArray(highlights)) {
+    res.status(400).json({error: 'highlights must be an array'});
+    return;
+  }
+  if (previousLearningPoints != null && !Array.isArray(previousLearningPoints)) {
+    res.status(400).json({error: 'previousLearningPoints must be an array'});
+    return;
+  }
 
   try {
-    const result = await summarizeArticleWithDeepSeek({title, content});
-    res.json(result);
+    const cacheKey = buildSummaryCacheKey({
+      mode: 'summarize',
+      title,
+      content,
+      highlights: Array.isArray(highlights) ? highlights : [],
+    });
+    if (!force) {
+      const cached = getCachedSummary(cacheKey);
+      if (cached?.payload) {
+        res.json({
+          ...cached.payload,
+          cacheHit: true,
+        });
+        return;
+      }
+    }
+
+    const result = await summarizeArticleWithDeepSeek({
+      title,
+      content,
+      highlights: Array.isArray(highlights) ? highlights : [],
+      previousLearningPoints: Array.isArray(previousLearningPoints) ? previousLearningPoints : [],
+      regenerateRequestId,
+      regenerate: Boolean(force),
+    });
+    setCachedSummary({
+      cacheKey,
+      mode: 'summarize',
+      payload: result,
+    });
+    res.json({
+      ...result,
+      cacheHit: false,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'DeepSeek summarize failed';
     const status = message === 'DEEPSEEK_API_KEY is not configured' ? 503 : 502;
     res.status(status).json({error: message});
+  }
+});
+
+app.post('/api/articles/summarize-stream', async (req, res) => {
+  const {title, content, highlights, previousLearningPoints, regenerateRequestId, force} = req.body ?? {};
+  if (!title || !content) {
+    res.status(400).json({error: 'title and content are required'});
+    return;
+  }
+  if (highlights != null && !Array.isArray(highlights)) {
+    res.status(400).json({error: 'highlights must be an array'});
+    return;
+  }
+  if (previousLearningPoints != null && !Array.isArray(previousLearningPoints)) {
+    res.status(400).json({error: 'previousLearningPoints must be an array'});
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  try {
+    const cacheKey = buildSummaryCacheKey({
+      mode: 'summarize',
+      title,
+      content,
+      highlights: Array.isArray(highlights) ? highlights : [],
+    });
+    if (!force) {
+      const cached = getCachedSummary(cacheKey);
+      if (cached?.payload) {
+        sendSseEvent(res, 'status', {
+          stage: 'cache_hit',
+          message: '命中缓存，正在返回结果',
+        });
+        sendSseEvent(res, 'result', {
+          ...cached.payload,
+          cacheHit: true,
+        });
+        sendSseEvent(res, 'done', {ok: true});
+        res.end();
+        return;
+      }
+    }
+
+    sendSseEvent(res, 'status', {
+      stage: 'start',
+      message: '开始生成总结',
+    });
+
+    const result = await summarizeArticleWithDeepSeek(
+      {
+        title,
+        content,
+        highlights: Array.isArray(highlights) ? highlights : [],
+        previousLearningPoints: Array.isArray(previousLearningPoints) ? previousLearningPoints : [],
+        regenerateRequestId,
+        regenerate: Boolean(force),
+      },
+      {
+        onProgress: (progress) => {
+          if (progress.stage === 'chunking') {
+            sendSseEvent(res, 'status', {
+              stage: progress.stage,
+              message: `已切分为 ${progress.totalChunks} 个分块`,
+              ...progress,
+            });
+            return;
+          }
+
+          if (progress.stage === 'chunk_summarizing') {
+            sendSseEvent(res, 'status', {
+              stage: progress.stage,
+              message: `正在处理分块 ${progress.currentChunk}/${progress.totalChunks}`,
+              ...progress,
+            });
+            return;
+          }
+          if (progress.stage === 'chunk_done') {
+            sendSseEvent(res, 'status', {
+              stage: progress.stage,
+              message: `已完成分块 ${progress.currentChunk}/${progress.totalChunks}`,
+              ...progress,
+            });
+            return;
+          }
+
+          sendSseEvent(res, 'status', {
+            stage: progress.stage,
+            message: '正在汇总最终结果',
+            ...progress,
+          });
+        },
+      },
+    );
+
+    setCachedSummary({
+      cacheKey,
+      mode: 'summarize',
+      payload: result,
+    });
+
+    sendSseEvent(res, 'result', {
+      ...result,
+      cacheHit: false,
+    });
+    sendSseEvent(res, 'done', {ok: true});
+    res.end();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'DeepSeek summarize failed';
+    sendSseEvent(res, 'error', {error: message});
+    sendSseEvent(res, 'done', {ok: false});
+    res.end();
   }
 });
 

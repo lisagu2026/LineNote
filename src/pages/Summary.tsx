@@ -1,8 +1,20 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
-import {createArticle, updateArticle, analyzeArticle, getSentenceTranslationsCached, summarizeArticle} from '../lib/api';
+import {
+  createArticle,
+  updateArticle,
+  analyzeArticle,
+  getSentenceTranslationsCached,
+  summarizeArticleStream,
+} from '../lib/api';
 import {useStore, Article, Card} from '../store';
 import {ChevronLeft, Download, ChevronDown, ChevronUp, Star, Save, Trash2} from 'lucide-react';
+
+function stripPointPrefix(point: string) {
+  return point
+    .replace(/^\[(词汇|语法|表达|内容)\]\s*/, '')
+    .trim();
+}
 
 export default function Summary() {
   const navigate = useNavigate();
@@ -12,6 +24,7 @@ export default function Summary() {
     activeArticleId,
     setActiveArticleId,
     articles,
+    cards,
     highlights,
     removeHighlight,
     replaceHighlights,
@@ -35,10 +48,25 @@ export default function Summary() {
   const [deleteCardId, setDeleteCardId] = useState<string | null>(null);
   const hasAnalyzedRef = useRef(false);
   const pollingTimerRef = useRef<number | null>(null);
-
-  function handleExportPdf() {
-    window.alert('导出 PDF 功能暂未上线');
-  }
+  const canRegenerateSummary = Boolean(activeArticleId);
+  const markdownSections = [
+    {
+      title: '词汇 (Vocabulary)',
+      items: learningPoints.filter((item) => item.startsWith('[词汇]')).map(stripPointPrefix),
+    },
+    {
+      title: '语法 (Grammar)',
+      items: learningPoints.filter((item) => item.startsWith('[语法]')).map(stripPointPrefix),
+    },
+    {
+      title: '表达 (Expression)',
+      items: learningPoints.filter((item) => item.startsWith('[表达]')).map(stripPointPrefix),
+    },
+    {
+      title: '内容 (Content)',
+      items: learningPoints.filter((item) => item.startsWith('[内容]')).map(stripPointPrefix),
+    },
+  ];
 
   useEffect(() => {
     if (hasAnalyzedRef.current) {
@@ -102,11 +130,22 @@ export default function Summary() {
         (item) => item.translationZh && item.lemma && item.usageNote,
       );
 
-      if (!forceRegenerate && hasReadyCardDetails) {
-        const summary = await summarizeArticle({
-          title: articleTitle || '未命名文章',
-          content: articleText,
-        });
+      if (forceRegenerate || hasReadyCardDetails) {
+        const summary = await summarizeArticleStream(
+          {
+            title: articleTitle || '未命名文章',
+            content: articleText,
+            highlights: highlights.map((item) => ({...item})),
+            previousLearningPoints: forceRegenerate ? learningPoints : [],
+            regenerateRequestId: forceRegenerate ? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` : '',
+            force: forceRegenerate,
+          },
+          {
+            onStatus: () => {
+              // Intentionally ignore progressive text details in UI.
+            },
+          },
+        );
         setLearningPoints(summary.learningPoints);
         setFullTranslationZh(summary.fullTranslationZh);
         setSummaryDraft({
@@ -114,12 +153,15 @@ export default function Summary() {
           articleText,
           learningPoints: summary.learningPoints,
           fullTranslationZh: summary.fullTranslationZh,
+          learningPointEvidences: summary.learningPointEvidences ?? [],
         });
       } else {
+        const requestHighlights = highlights.map((item) => ({...item}));
         const result = await analyzeArticle({
           title: articleTitle || '未命名文章',
           content: articleText,
-          highlights,
+          highlights: requestHighlights,
+          force: forceRegenerate,
         });
 
         setLearningPoints(result.learningPoints);
@@ -129,12 +171,33 @@ export default function Summary() {
           articleText,
           learningPoints: result.learningPoints,
           fullTranslationZh: result.fullTranslationZh,
+          learningPointEvidences: [],
         });
+        const latestHighlights = useStore.getState().highlights;
+        const requestIndexById = new Map(requestHighlights.map((item, index) => [item.id, index]));
         replaceHighlights(
-          highlights.map((highlight, index) => ({
-            ...highlight,
-            ...result.cards[index],
-          })),
+          latestHighlights.map((highlight) => {
+            const requestIndex = requestIndexById.get(highlight.id);
+            if (requestIndex === undefined) {
+              return highlight;
+            }
+
+            const aiCard = result.cards[requestIndex];
+            if (!aiCard) {
+              return highlight;
+            }
+
+            return {
+              ...highlight,
+              // Keep user-edited fields; only fill missing values from AI.
+              translationZh: highlight.translationZh || aiCard.translationZh,
+              lemma: highlight.lemma || aiCard.lemma,
+              usageNote: highlight.usageNote || aiCard.usageNote,
+              example: highlight.example || aiCard.example,
+              note: highlight.note || aiCard.note,
+              isImportant: highlight.isImportant,
+            };
+          }),
         );
       }
 
@@ -194,12 +257,24 @@ export default function Summary() {
       createdAt,
     };
 
-    const newCards: Card[] = highlights.map((h) => ({
-      ...h,
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      articleId,
-      createdAt,
-    }));
+    const currentHighlightIds = new Set(highlights.map((item) => item.id));
+    const usedIds = new Set<string>(
+      cards.map((card) => card.id).filter((id) => !currentHighlightIds.has(id)),
+    );
+    const newCards: Card[] = highlights.map((h, index) => {
+      let nextId = h.id || `${articleId}-${index}`;
+      while (usedIds.has(nextId)) {
+        nextId = `${nextId}-${Math.random().toString(36).slice(2, 6)}`;
+      }
+      usedIds.add(nextId);
+
+      return {
+        ...h,
+        id: nextId,
+        articleId,
+        createdAt,
+      };
+    });
 
     try {
       if (activeArticleId) {
@@ -239,11 +314,12 @@ export default function Summary() {
         </div>
         <div className="flex items-center space-x-2">
           <button
-            onClick={handleExportPdf}
-            className="bg-stone-100 hover:bg-stone-200 text-stone-700 px-4 py-2 rounded-full text-sm font-medium transition-colors hidden sm:flex items-center space-x-2"
+            disabled
+            title="即将上线"
+            className="bg-stone-100 text-stone-400 px-4 py-2 rounded-full text-sm font-medium hidden sm:flex items-center space-x-2 cursor-not-allowed"
           >
             <Download className="w-4 h-4" />
-            <span>导出 PDF</span>
+            <span>导出 PDF（即将上线）</span>
           </button>
           <button
             onClick={handleSaveToLibrary}
@@ -253,19 +329,20 @@ export default function Summary() {
             <Save className="w-4 h-4" />
             <span>{isSaving ? '保存中...' : '保存到知识库'}</span>
           </button>
-          <button
-            onClick={() => navigate('/reader?resume=1')}
-            className="bg-white hover:bg-stone-50 text-stone-700 border border-stone-200 px-4 py-2 rounded-full text-sm font-medium transition-colors"
-          >
-            返回继续划线
-          </button>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-8 space-y-8">
         {analysisStatus === 'loading' && (
           <section className="bg-white rounded-2xl p-6 shadow-sm border border-stone-100">
-            <p className="text-sm text-stone-500">AI 正在生成总结，请稍候...</p>
+            <p className="text-sm text-stone-600 inline-flex items-center">
+              AI 正在思考
+              <span className="inline-flex ml-1">
+                <span className="animate-pulse">.</span>
+                <span className="animate-pulse [animation-delay:180ms]">.</span>
+                <span className="animate-pulse [animation-delay:360ms]">.</span>
+              </span>
+            </p>
           </section>
         )}
 
@@ -290,21 +367,34 @@ export default function Summary() {
               <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 font-bold text-sm">A</div>
               <h2 className="text-lg font-semibold text-stone-800">本篇学习提要</h2>
             </div>
-            <button
-              onClick={handleRegenerateSummary}
-              className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-1.5 rounded-full font-medium transition-colors"
-            >
-              重新生成总结
-            </button>
+            {canRegenerateSummary && (
+              <button
+                onClick={handleRegenerateSummary}
+                className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-1.5 rounded-full font-medium transition-colors"
+              >
+                重新生成总结
+              </button>
+            )}
           </div>
-          <ul className="space-y-3">
-            {(learningPoints.length ? learningPoints : ['等待生成学习提要...']).map((point, idx) => (
-              <li key={idx} className="flex items-start space-x-3 text-stone-600 text-sm leading-relaxed">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-2 flex-shrink-0"></span>
-                <span>{point}</span>
-              </li>
-            ))}
-          </ul>
+          {learningPoints.length === 0 ? (
+            <p className="text-sm text-stone-500">等待生成学习提要...</p>
+          ) : (
+            <div className="rounded-xl border border-stone-200 bg-stone-50 p-5 text-sm leading-relaxed text-stone-700">
+              <h3 className="text-base font-semibold text-stone-900">本篇学习总结</h3>
+              {markdownSections.map((section) => (
+                section.items.length > 0 ? (
+                  <div key={section.title} className="mt-4">
+                    <h4 className="text-sm font-semibold text-stone-800">{section.title}</h4>
+                    <ul className="mt-2 space-y-1">
+                      {section.items.map((item, idx) => (
+                        <li key={`${section.title}-${idx}`} className="list-disc ml-5">{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">

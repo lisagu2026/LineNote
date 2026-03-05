@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -53,6 +54,13 @@ db.exec(`
     sentence_key TEXT PRIMARY KEY,
     sentence_text TEXT NOT NULL,
     translation_zh TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS summary_cache (
+    cache_key TEXT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    result_json TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   );
 `);
@@ -139,6 +147,42 @@ const deleteArticleStmt = db.prepare(`
   DELETE FROM articles WHERE id = ?
 `);
 
+const deleteCardStmt = db.prepare(`
+  DELETE FROM cards WHERE id = ?
+`);
+
+const updateCardStmt = db.prepare(`
+  UPDATE cards
+  SET
+    is_important = ?,
+    lemma = ?,
+    translation_zh = ?,
+    usage_note = ?,
+    example = ?,
+    note = ?,
+    start_offset = ?,
+    end_offset = ?
+  WHERE id = ?
+`);
+
+const selectCardByIdStmt = db.prepare(`
+  SELECT
+    id,
+    article_id,
+    original_text,
+    is_important,
+    lemma,
+    translation_zh,
+    usage_note,
+    example,
+    note,
+    start_offset,
+    end_offset,
+    created_at
+  FROM cards
+  WHERE id = ?
+`);
+
 const selectTranslationCacheStmt = db.prepare(`
   SELECT
     cache_key,
@@ -192,6 +236,28 @@ const upsertSentenceTranslationCacheStmt = db.prepare(`
   ) VALUES (?, ?, ?, ?)
   ON CONFLICT(sentence_key) DO UPDATE SET
     translation_zh = excluded.translation_zh,
+    updated_at = excluded.updated_at
+`);
+
+const selectSummaryCacheStmt = db.prepare(`
+  SELECT
+    cache_key,
+    mode,
+    result_json,
+    updated_at
+  FROM summary_cache
+  WHERE cache_key = ?
+`);
+
+const upsertSummaryCacheStmt = db.prepare(`
+  INSERT INTO summary_cache (
+    cache_key,
+    mode,
+    result_json,
+    updated_at
+  ) VALUES (?, ?, ?, ?)
+  ON CONFLICT(cache_key) DO UPDATE SET
+    result_json = excluded.result_json,
     updated_at = excluded.updated_at
 `);
 
@@ -357,6 +423,38 @@ export function upsertArticle(input) {
   return getArticleById(article.id);
 }
 
+export function deleteArticleById(articleId) {
+  const result = deleteArticleStmt.run(articleId);
+  return result.changes > 0;
+}
+
+export function deleteCardById(cardId) {
+  const result = deleteCardStmt.run(cardId);
+  return result.changes > 0;
+}
+
+export function updateCardById(cardId, updates = {}) {
+  const current = selectCardByIdStmt.get(cardId);
+  if (!current) {
+    return null;
+  }
+
+  updateCardStmt.run(
+    updates.isImportant !== undefined ? (updates.isImportant ? 1 : 0) : current.is_important,
+    updates.lemma ?? current.lemma,
+    updates.translationZh ?? current.translation_zh,
+    updates.usageNote ?? current.usage_note,
+    updates.example ?? current.example,
+    updates.note ?? current.note,
+    updates.start ?? current.start_offset,
+    updates.end ?? current.end_offset,
+    cardId,
+  );
+
+  const updated = selectCardByIdStmt.get(cardId);
+  return updated ? mapCardRow(updated) : null;
+}
+
 function normalizeCachePart(value) {
   return String(value ?? '')
     .trim()
@@ -410,6 +508,62 @@ export function setCachedTranslation(input) {
 
 export function buildSentenceCacheKey(sentenceText) {
   return normalizeCachePart(sentenceText);
+}
+
+function hashText(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+export function buildSummaryCacheKey(input) {
+  const mode = normalizeCachePart(input.mode || 'summarize');
+  const title = normalizeCachePart(input.title || '');
+  const content = String(input.content ?? '');
+  const highlights = Array.isArray(input.highlights) ? input.highlights : [];
+  const highlightsFingerprint = highlights
+    .map((item) =>
+      [
+        normalizeCachePart(item.originalText),
+        Number(item.start ?? 0),
+        Number(item.end ?? 0),
+      ].join(':'),
+    )
+    .join('|');
+
+  return `${mode}:${hashText(`${title}\n${content}\n${highlightsFingerprint}`)}`;
+}
+
+export function getCachedSummary(cacheKey) {
+  const row = selectSummaryCacheStmt.get(cacheKey);
+  if (!row) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(row.result_json);
+    return {
+      mode: row.mode,
+      payload,
+      updatedAt: row.updated_at,
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+export function setCachedSummary(input) {
+  const updatedAt = Date.now();
+  upsertSummaryCacheStmt.run(
+    input.cacheKey,
+    input.mode,
+    JSON.stringify(input.payload),
+    updatedAt,
+  );
+
+  return {
+    mode: input.mode,
+    payload: input.payload,
+    updatedAt,
+  };
 }
 
 export function getCachedSentenceTranslation(sentenceKey) {

@@ -1,12 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
-import { fetchHealth } from '../lib/api';
+import {
+  type ApiCard,
+  deleteArticle as deleteArticleRequest,
+  deleteCard as deleteCardRequest,
+  fetchHealth,
+  listArticlesWithCards,
+  updateCard as updateCardRequest,
+} from '../lib/api';
 import { Search, Plus, ChevronRight, BookOpen, Star, LayoutGrid, CheckSquare, Square, Download, Trash2, X, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 
 export default function Library() {
   const navigate = useNavigate();
-  const { articles, cards, updateCard, removeArticle, removeCard } = useStore();
+  const { articles, cards, replaceLibraryData, updateCard, removeArticle, removeCard } = useStore();
   
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'articles' | 'cards'>('articles');
@@ -16,24 +23,85 @@ export default function Library() {
   const [drawerCardId, setDrawerCardId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'article' | 'card', id: string } | null>(null);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
+  const [libraryLoading, setLibraryLoading] = useState(true);
+  const [libraryError, setLibraryError] = useState('');
+  const pendingCardUpdatesRef = useRef<Record<string, Partial<ApiCard>>>({});
+  const saveTimersRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     let cancelled = false;
 
-    fetchHealth()
-      .then(() => {
+    async function bootstrap() {
+      try {
+        await fetchHealth();
         if (!cancelled) {
           setBackendStatus('connected');
         }
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) {
           setBackendStatus('offline');
         }
-      });
+      }
+
+      try {
+        const resolved = await listArticlesWithCards();
+
+        if (cancelled) {
+          return;
+        }
+
+        const nextArticles = resolved.map((item) => ({
+          id: item.id,
+          title: item.title,
+          content: item.content,
+          learningPoints: item.learningPoints,
+          fullTranslationZh: item.fullTranslationZh,
+          createdAt: item.createdAt,
+        }));
+
+        const nextCards = resolved.flatMap((item) =>
+          (item.cards ?? []).map((card) => ({
+            id: card.id,
+            articleId: item.id,
+            originalText: card.originalText,
+            isImportant: card.isImportant,
+            lemma: card.lemma,
+            translationZh: card.translationZh,
+            usageNote: card.usageNote,
+            example: card.example,
+            note: card.note,
+            start: card.start,
+            end: card.end,
+            createdAt: card.createdAt ?? item.createdAt,
+          })),
+        );
+
+        replaceLibraryData(nextArticles, nextCards);
+        setLibraryError('');
+      } catch (error) {
+        if (!cancelled) {
+          setLibraryError(error instanceof Error ? error.message : '加载知识库失败');
+        }
+      } finally {
+        if (!cancelled) {
+          setLibraryLoading(false);
+        }
+      }
+    }
+
+    void bootstrap();
 
     return () => {
       cancelled = true;
+    };
+  }, [replaceLibraryData]);
+
+  useEffect(() => {
+    return () => {
+      for (const key in saveTimersRef.current) {
+        window.clearTimeout(saveTimersRef.current[key]);
+      }
+      saveTimersRef.current = {};
     };
   }, []);
 
@@ -67,10 +135,6 @@ export default function Library() {
     });
   };
 
-  const handleExportPdf = () => {
-    window.alert('导出 PDF 功能暂未上线');
-  };
-
   const toggleCardSelection = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     const newSet = new Set(selectedCardIds);
@@ -81,6 +145,77 @@ export default function Library() {
 
   const drawerCard = cards.find(c => c.id === drawerCardId);
   const drawerArticle = drawerCard ? articles.find(a => a.id === drawerCard.articleId) : null;
+
+  const toggleImportant = async (cardId: string, nextValue: boolean) => {
+    const current = cards.find((item) => item.id === cardId);
+    if (!current) {
+      return;
+    }
+
+    setLibraryError('');
+    updateCard(cardId, {isImportant: nextValue});
+    try {
+      await updateCardRequest(cardId, {isImportant: nextValue});
+    } catch (error) {
+      updateCard(cardId, {isImportant: current.isImportant});
+      setLibraryError(error instanceof Error ? error.message : '更新重点状态失败，已回滚');
+    }
+  };
+
+  const flushCardUpdates = async (cardId: string) => {
+    const pending = pendingCardUpdatesRef.current[cardId];
+    if (!pending || Object.keys(pending).length === 0) {
+      return;
+    }
+
+    delete pendingCardUpdatesRef.current[cardId];
+    try {
+      await updateCardRequest(cardId, pending);
+    } catch (error) {
+      pendingCardUpdatesRef.current[cardId] = {
+        ...(pendingCardUpdatesRef.current[cardId] ?? {}),
+        ...pending,
+      };
+      setLibraryError(error instanceof Error ? error.message : '卡片保存失败，请重试');
+    }
+  };
+
+  const queueCardPersist = (cardId: string, updates: Partial<ApiCard>) => {
+    pendingCardUpdatesRef.current[cardId] = {
+      ...(pendingCardUpdatesRef.current[cardId] ?? {}),
+      ...updates,
+    };
+
+    if (saveTimersRef.current[cardId]) {
+      window.clearTimeout(saveTimersRef.current[cardId]);
+    }
+
+    saveTimersRef.current[cardId] = window.setTimeout(() => {
+      void flushCardUpdates(cardId);
+      delete saveTimersRef.current[cardId];
+    }, 1200);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteConfirm) {
+      return;
+    }
+
+    const target = deleteConfirm;
+    setDeleteConfirm(null);
+
+    try {
+      if (target.type === 'article') {
+        await deleteArticleRequest(target.id);
+        removeArticle(target.id);
+      } else {
+        await deleteCardRequest(target.id);
+        removeCard(target.id);
+      }
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : '删除失败');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 font-sans pb-20">
@@ -117,6 +252,12 @@ export default function Library() {
                 : '检测后端中'}
           </div>
         </div>
+
+        {libraryError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {libraryError}
+          </div>
+        )}
 
         {/* Search Box */}
         <div className="relative">
@@ -169,11 +310,12 @@ export default function Library() {
               </button>
               {selectedCardIds.size > 0 && (
                 <button
-                  onClick={handleExportPdf}
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded-full text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm"
+                  disabled
+                  title="即将上线"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded-full text-sm font-medium bg-stone-200 text-stone-500 cursor-not-allowed shadow-sm"
                 >
                   <Download className="w-4 h-4" />
-                  <span>导出选中 ({selectedCardIds.size})</span>
+                  <span>导出选中（即将上线）</span>
                 </button>
               )}
             </div>
@@ -187,7 +329,11 @@ export default function Library() {
             <h2 className="text-sm font-medium text-stone-500 mb-4 px-2">
               我的文章 ({filteredArticles.length})
             </h2>
-            {filteredArticles.length === 0 ? (
+            {libraryLoading ? (
+              <div className="bg-white rounded-2xl p-12 text-center border border-stone-100 border-dashed">
+                <p className="text-stone-500">正在加载知识库...</p>
+              </div>
+            ) : filteredArticles.length === 0 ? (
               <div className="bg-white rounded-2xl p-12 text-center border border-stone-100 border-dashed">
                 <p className="text-stone-500 mb-4">{searchQuery ? '未找到匹配的文章' : '知识库还是空的，去精读第一篇文章吧！'}</p>
                 {!searchQuery && (
@@ -287,7 +433,7 @@ export default function Library() {
                             </div>
                             <div className="flex items-center space-x-1 flex-shrink-0 ml-2">
                               <button
-                                onClick={() => updateCard(card.id, { isImportant: !card.isImportant })}
+                                onClick={() => void toggleImportant(card.id, !card.isImportant)}
                                 className={`p-1.5 rounded-full transition-colors ${card.isImportant ? 'bg-amber-100 text-amber-500' : 'bg-stone-100 text-stone-400 hover:bg-stone-200'}`}
                               >
                                 <Star className={`w-4 h-4 ${card.isImportant ? 'fill-current' : ''}`} />
@@ -376,7 +522,7 @@ export default function Library() {
             <div className="flex items-center justify-between p-4 border-b border-stone-100 bg-stone-50/50">
               <div className="flex items-center space-x-3">
                 <button
-                  onClick={() => updateCard(drawerCard.id, { isImportant: !drawerCard.isImportant })}
+                  onClick={() => void toggleImportant(drawerCard.id, !drawerCard.isImportant)}
                   className={`p-2 rounded-full transition-colors ${drawerCard.isImportant ? 'bg-amber-100 text-amber-500' : 'bg-white text-stone-400 hover:bg-stone-100 shadow-sm border border-stone-200'}`}
                   title={drawerCard.isImportant ? "取消重点" : "标记为重点"}
                 >
@@ -431,7 +577,15 @@ export default function Library() {
                 <h3 className="text-xs font-medium text-stone-400 uppercase tracking-wider mb-2">中文翻译</h3>
                 <textarea
                   value={drawerCard.translationZh}
-                  onChange={(e) => updateCard(drawerCard.id, { translationZh: e.target.value })}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setLibraryError('');
+                    updateCard(drawerCard.id, {translationZh: value});
+                    queueCardPersist(drawerCard.id, {translationZh: value});
+                  }}
+                  onBlur={() => {
+                    void flushCardUpdates(drawerCard.id);
+                  }}
                   className="w-full bg-white border border-stone-200 rounded-xl px-4 py-3 text-stone-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
                   rows={2}
                 />
@@ -444,7 +598,15 @@ export default function Library() {
                   <input
                     type="text"
                     value={drawerCard.lemma}
-                    onChange={(e) => updateCard(drawerCard.id, { lemma: e.target.value })}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setLibraryError('');
+                      updateCard(drawerCard.id, {lemma: value});
+                      queueCardPersist(drawerCard.id, {lemma: value});
+                    }}
+                    onBlur={() => {
+                      void flushCardUpdates(drawerCard.id);
+                    }}
                     placeholder="如: делать / сделать"
                     className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                   />
@@ -455,7 +617,15 @@ export default function Library() {
                   <input
                     type="text"
                     value={drawerCard.usageNote}
-                    onChange={(e) => updateCard(drawerCard.id, { usageNote: e.target.value })}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setLibraryError('');
+                      updateCard(drawerCard.id, {usageNote: value});
+                      queueCardPersist(drawerCard.id, {usageNote: value});
+                    }}
+                    onBlur={() => {
+                      void flushCardUpdates(drawerCard.id);
+                    }}
                     placeholder="一句话简明用法"
                     className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                   />
@@ -465,7 +635,15 @@ export default function Library() {
                   <label className="block text-xs font-medium text-stone-500 mb-1.5">例句</label>
                   <textarea
                     value={drawerCard.example}
-                    onChange={(e) => updateCard(drawerCard.id, { example: e.target.value })}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setLibraryError('');
+                      updateCard(drawerCard.id, {example: value});
+                      queueCardPersist(drawerCard.id, {example: value});
+                    }}
+                    onBlur={() => {
+                      void flushCardUpdates(drawerCard.id);
+                    }}
                     placeholder="输入例句..."
                     rows={3}
                     className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
@@ -476,7 +654,15 @@ export default function Library() {
                   <label className="block text-xs font-medium text-stone-500 mb-1.5">备注</label>
                   <textarea
                     value={drawerCard.note}
-                    onChange={(e) => updateCard(drawerCard.id, { note: e.target.value })}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setLibraryError('');
+                      updateCard(drawerCard.id, {note: value});
+                      queueCardPersist(drawerCard.id, {note: value});
+                    }}
+                    onBlur={() => {
+                      void flushCardUpdates(drawerCard.id);
+                    }}
                     placeholder="补充笔记..."
                     rows={3}
                     className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
@@ -508,14 +694,7 @@ export default function Library() {
                 取消
               </button>
               <button
-                onClick={() => {
-                  if (deleteConfirm.type === 'article') {
-                    removeArticle(deleteConfirm.id);
-                  } else {
-                    removeCard(deleteConfirm.id);
-                  }
-                  setDeleteConfirm(null);
-                }}
+                onClick={() => void handleDeleteConfirm()}
                 className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
               >
                 确认删除

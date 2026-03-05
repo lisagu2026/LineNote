@@ -33,6 +33,8 @@ export interface AnalyzeArticleResult {
 export interface SummarizeArticleResult {
   learningPoints: string[];
   fullTranslationZh: string;
+  learningPointEvidences?: Array<{point: string; sourceSnippets: string[]}>;
+  cacheHit?: boolean;
 }
 
 export interface TranslateHighlightResult {
@@ -76,6 +78,12 @@ export async function listArticles() {
   return payload.items as ApiArticle[];
 }
 
+export async function listArticlesWithCards() {
+  const response = await fetch(`${API_BASE_URL}/api/articles?includeCards=1`);
+  const payload = await parseJsonResponse(response);
+  return payload.items as ApiArticle[];
+}
+
 export async function getArticle(articleId: string) {
   const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`);
   return (await parseJsonResponse(response)) as ApiArticle;
@@ -105,10 +113,43 @@ export async function updateArticle(articleId: string, article: ApiArticle) {
   return (await parseJsonResponse(response)) as ApiArticle;
 }
 
+export async function deleteArticle(articleId: string) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    await parseJsonResponse(response);
+  }
+}
+
+export async function updateCard(cardId: string, card: Partial<ApiCard>) {
+  const response = await fetch(`${API_BASE_URL}/api/cards/${cardId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(card),
+  });
+
+  return (await parseJsonResponse(response)) as ApiCard;
+}
+
+export async function deleteCard(cardId: string) {
+  const response = await fetch(`${API_BASE_URL}/api/cards/${cardId}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    await parseJsonResponse(response);
+  }
+}
+
 export async function analyzeArticle(input: {
   title: string;
   content: string;
   highlights?: ApiCard[];
+  force?: boolean;
 }) {
   const response = await fetch(`${API_BASE_URL}/api/articles/analyze`, {
     method: 'POST',
@@ -121,7 +162,7 @@ export async function analyzeArticle(input: {
   return (await parseJsonResponse(response)) as AnalyzeArticleResult;
 }
 
-export async function summarizeArticle(input: {title: string; content: string}) {
+export async function summarizeArticle(input: {title: string; content: string; highlights?: ApiCard[]; force?: boolean}) {
   const response = await fetch(`${API_BASE_URL}/api/articles/summarize`, {
     method: 'POST',
     headers: {
@@ -131,6 +172,93 @@ export async function summarizeArticle(input: {title: string; content: string}) 
   });
 
   return (await parseJsonResponse(response)) as SummarizeArticleResult;
+}
+
+export async function summarizeArticleStream(
+  input: {
+    title: string;
+    content: string;
+    highlights?: ApiCard[];
+    previousLearningPoints?: string[];
+    regenerateRequestId?: string;
+    force?: boolean;
+  },
+  handlers?: {
+    onStatus?: (status: {
+      stage: string;
+      message?: string;
+      totalChunks?: number;
+      doneChunks?: number;
+      currentChunk?: number;
+      previewPoints?: string[];
+    }) => void;
+  },
+) {
+  const response = await fetch(`${API_BASE_URL}/api/articles/summarize-stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({}));
+    const message =
+      typeof payload.error === 'string' ? payload.error : `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: SummarizeArticleResult | null = null;
+
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, {stream: true});
+    const blocks = buffer.split('\n\n');
+    buffer = blocks.pop() ?? '';
+
+    for (const block of blocks) {
+      const lines = block
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (!lines.length) {
+        continue;
+      }
+
+      const eventLine = lines.find((line) => line.startsWith('event:'));
+      const dataLine = lines.find((line) => line.startsWith('data:'));
+      const event = eventLine ? eventLine.slice(6).trim() : 'message';
+      const payloadText = dataLine ? dataLine.slice(5).trim() : '{}';
+      let payload: any = {};
+      try {
+        payload = JSON.parse(payloadText);
+      } catch {
+        payload = {};
+      }
+
+      if (event === 'status') {
+        handlers?.onStatus?.(payload);
+      } else if (event === 'result') {
+        result = payload as SummarizeArticleResult;
+      } else if (event === 'error') {
+        throw new Error(typeof payload.error === 'string' ? payload.error : 'Stream summarize failed');
+      }
+    }
+  }
+
+  if (!result) {
+    throw new Error('Stream summarize finished without result');
+  }
+
+  return result;
 }
 
 export async function translateHighlight(input: {

@@ -162,7 +162,7 @@ export async function analyzeArticle(input: {
   return (await parseJsonResponse(response)) as AnalyzeArticleResult;
 }
 
-export async function summarizeArticle(input: {title: string; content: string}) {
+export async function summarizeArticle(input: {title: string; content: string; highlights?: ApiCard[]; force?: boolean}) {
   const response = await fetch(`${API_BASE_URL}/api/articles/summarize`, {
     method: 'POST',
     headers: {
@@ -175,7 +175,14 @@ export async function summarizeArticle(input: {title: string; content: string}) 
 }
 
 export async function summarizeArticleStream(
-  input: {title: string; content: string; force?: boolean},
+  input: {
+    title: string;
+    content: string;
+    highlights?: ApiCard[];
+    previousLearningPoints?: string[];
+    regenerateRequestId?: string;
+    force?: boolean;
+  },
   handlers?: {
     onStatus?: (status: {
       stage: string;
@@ -183,6 +190,7 @@ export async function summarizeArticleStream(
       totalChunks?: number;
       doneChunks?: number;
       currentChunk?: number;
+      previewPoints?: string[];
     }) => void;
   },
 ) {

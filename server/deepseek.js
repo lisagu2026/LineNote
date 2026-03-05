@@ -36,6 +36,24 @@ function chunkTextBySentences(content, maxChars = 1400) {
   return chunks;
 }
 
+function toSummaryHighlightFocus(highlights) {
+  if (!Array.isArray(highlights)) {
+    return [];
+  }
+
+  return highlights
+    .map((item, index) => ({
+      index,
+      originalText: normalizeString(item?.originalText),
+      isImportant: Boolean(item?.isImportant),
+      translationZh: normalizeString(item?.translationZh),
+      lemma: normalizeString(item?.lemma),
+      usageNote: normalizeString(item?.usageNote),
+    }))
+    .filter((item) => item.originalText)
+    .slice(0, 30);
+}
+
 function buildPrompt({title, content, highlights}) {
   const cards = highlights.map((item, index) => ({
     index,
@@ -48,18 +66,25 @@ function buildPrompt({title, content, highlights}) {
   }));
 
   return [
+    '角色设定：你是一位拥有10年经验的资深俄语导师，擅长化繁为简。',
     '请分析下面这篇俄语文章，并严格返回 JSON 对象。',
     '只允许输出一个 JSON 对象，禁止 Markdown，禁止解释，禁止额外字段。',
     'JSON 结构必须是：',
     '{"learningPoints":["..."],"fullTranslationZh":"...","cards":[{"originalText":"...","lemma":"...","translationZh":"...","usageNote":"...","example":"...","note":"...","isImportant":true}]}',
     '约束：',
-    '1. learningPoints 返回 5 到 8 条，每条不超过 80 个中文字符。',
-    '2. fullTranslationZh 必须是整篇文章的自然中文翻译。',
-    '3. cards 数量必须与输入 highlights 完全一致，顺序也必须一致。',
-    '4. cards 里的 originalText 必须与输入中的 originalText 完全一致。',
-    '5. usageNote 必须简短，控制在一行内。',
-    '6. example 如果无必要可为空字符串，note 可以为空字符串。',
-    '7. isImportant 根据学习价值判断 true 或 false。',
+    '1. learningPoints 返回 8 到 12 条，尽量详细、具有学习步骤感。',
+    '2. learningPoints 需覆盖四个模块：',
+    '   - 一句话梗概(Краткое содержание)：给出中俄双语主旨（可用“RU:... | ZH:...”）。',
+    '   - 核心句法拆解(Синтаксический анализ)：至少 1 条，包含“原句+主谓宾骨架+格/从句逻辑”。',
+    '   - 划线词关联图谱(Связи подчеркнутых слов)：说明划线词如何按语义/语法成组出现。',
+    '   - 俄语地道表达说(Живая речь)：至少 2 条，突出中式俄语与地道俄语差异。',
+    '3. 若未提供有效划线词，请先从原文自动挑选 5 个核心词再做“关联图谱”。',
+    '4. fullTranslationZh 必须是整篇文章的自然中文翻译。',
+    '5. cards 数量必须与输入 highlights 完全一致，顺序也必须一致。',
+    '6. cards 里的 originalText 必须与输入中的 originalText 完全一致。',
+    '7. usageNote 必须简短，控制在一行内。',
+    '8. example 如果无必要可为空字符串，note 可以为空字符串。',
+    '9. isImportant 根据学习价值判断 true 或 false。',
     '',
     `文章标题：${title}`,
     `文章内容：${content}`,
@@ -77,17 +102,49 @@ function validateLearningPointsRaw(input) {
   }
 
   const cleaned = input.map((item) => normalizeString(item)).filter(Boolean);
-  if (cleaned.length < 5 || cleaned.length > 8) {
-    throw new Error('learningPoints must contain 5-8 items');
-  }
-
-  for (const point of cleaned) {
-    if (point.length > 80) {
-      throw new Error('learningPoints item exceeds 80 chars');
-    }
+  if (cleaned.length < 7 || cleaned.length > 14) {
+    throw new Error('learningPoints must contain 7-14 items');
   }
 
   return cleaned;
+}
+
+function categorizeLearningPoint(point) {
+  if (point.startsWith('[词汇]')) return 'vocab';
+  if (point.startsWith('[语法]')) return 'grammar';
+  if (point.startsWith('[表达]')) return 'expression';
+  if (point.startsWith('[内容]')) return 'content';
+  return 'unknown';
+}
+
+function validateLearningPointCategories(points) {
+  const buckets = {
+    vocab: 0,
+    grammar: 0,
+    expression: 0,
+    content: 0,
+    unknown: 0,
+  };
+
+  for (const point of points) {
+    buckets[categorizeLearningPoint(point)] += 1;
+  }
+
+  if (buckets.unknown > 0) {
+    throw new Error('learningPoints must use [词汇]/[语法]/[表达]/[内容] prefix');
+  }
+  if (buckets.vocab < 2) {
+    throw new Error('learningPoints must include at least 2 [词汇] points');
+  }
+  if (buckets.grammar < 2) {
+    throw new Error('learningPoints must include at least 2 [语法] points');
+  }
+  if (buckets.expression < 2) {
+    throw new Error('learningPoints must include at least 2 [表达] points');
+  }
+  if (buckets.content < 1) {
+    throw new Error('learningPoints must include at least 1 [内容] point');
+  }
 }
 
 function validateAnalysisPayload(payload, highlights) {
@@ -96,6 +153,7 @@ function validateAnalysisPayload(payload, highlights) {
   }
 
   const learningPoints = validateLearningPointsRaw(payload.learningPoints);
+  validateLearningPointCategories(learningPoints);
 
   const fullTranslationZh = normalizeString(payload.fullTranslationZh);
   if (!fullTranslationZh) {
@@ -151,6 +209,7 @@ function validateSummaryPayload(payload) {
   });
 
   const learningPoints = validateLearningPointsRaw(normalizedPoints.map((item) => item.point));
+  validateLearningPointCategories(learningPoints);
 
   const fullTranslationZh = normalizeString(payload.fullTranslationZh);
   if (!fullTranslationZh) {
@@ -170,6 +229,8 @@ function validateSummaryPayload(payload) {
 }
 
 async function requestAnalysis(messages, options = {}) {
+  const temperature = typeof options.temperature === 'number' ? options.temperature : 0.2;
+  const topP = typeof options.topP === 'number' ? options.topP : 0.8;
   const response = await fetch(DEEPSEEK_API_URL, {
     method: 'POST',
     headers: {
@@ -178,8 +239,8 @@ async function requestAnalysis(messages, options = {}) {
     },
     body: JSON.stringify({
       model: DEEPSEEK_MODEL,
-      temperature: 0.2,
-      top_p: 0.8,
+      temperature,
+      top_p: topP,
       max_tokens: options.maxTokens,
       response_format: {type: 'json_object'},
       messages,
@@ -257,11 +318,11 @@ function validateChunkSummaryPayload(payload) {
 
   return {
     chunkTranslationZh,
-    points: points.slice(0, 4),
+    points: points.slice(0, 5),
   };
 }
 
-async function summarizeChunkWithDeepSeek(chunk, index, totalChunks) {
+async function summarizeChunkWithDeepSeek(chunk, index, totalChunks, options = {}) {
   const messages = [
     {
       role: 'system',
@@ -274,16 +335,21 @@ async function summarizeChunkWithDeepSeek(chunk, index, totalChunks) {
         '请基于下面文章分块，输出 JSON：',
         '{"chunkTranslationZh":"...","points":[{"point":"...","evidence":["..."]}]}',
         '约束：',
-        '1. points 返回 2 到 4 条。',
-        '2. point 用中文，不超过 80 字。',
-        '3. evidence 是支持该 point 的原文短句数组（1-2条）。',
+        '1. points 返回 3 到 5 条。',
+        '2. point 必须是语言学习点，不得写新闻事实复述。',
+        '3. point 用中文，允许写成 1-2 句，且以 [词汇]/[语法]/[表达] 之一开头。',
+        '4. evidence 是支持该 point 的原文短句数组（1-2条）。',
         `当前分块：${index + 1}/${totalChunks}`,
         `分块内容：${chunk}`,
       ].join('\n'),
     },
   ];
 
-  const payload = await requestAnalysis(messages, {maxTokens: 900});
+  const payload = await requestAnalysis(messages, {
+    maxTokens: 1200,
+    temperature: options.regenerate ? 0.55 : 0.2,
+    topP: options.regenerate ? 0.9 : 0.8,
+  });
   return validateChunkSummaryPayload(payload);
 }
 
@@ -316,8 +382,17 @@ export async function summarizeArticleWithDeepSeek(input, options = {}) {
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const summary = await summarizeChunkWithDeepSeek(chunk, index, chunks.length);
+        const summary = await summarizeChunkWithDeepSeek(chunk, index, chunks.length, {
+          regenerate: Boolean(input.regenerate),
+        });
         chunkSummaries.push(summary);
+        options.onProgress?.({
+          stage: 'chunk_done',
+          totalChunks: chunks.length,
+          doneChunks: index + 1,
+          currentChunk: index + 1,
+          previewPoints: summary.points.map((item) => item.point).slice(0, 3),
+        });
         lastError = null;
         break;
       } catch (error) {
@@ -336,24 +411,49 @@ export async function summarizeArticleWithDeepSeek(input, options = {}) {
     doneChunks: chunks.length,
   });
 
+  const highlightFocus = toSummaryHighlightFocus(input.highlights);
+  const previousLearningPoints = Array.isArray(input.previousLearningPoints)
+    ? input.previousLearningPoints.map((item) => normalizeString(item)).filter(Boolean).slice(0, 8)
+    : [];
+  const regenerateRequestId = normalizeString(input.regenerateRequestId);
+
   const messages = [
     {
       role: 'system',
       content:
-        '你是一个俄语语言分析工具。你只输出严格 JSON，不解释，不使用 Markdown，不输出多余文字。',
+        '你是一位拥有10年经验的资深俄语导师。你只输出严格 JSON，不解释，不使用 Markdown，不输出多余文字。',
     },
     {
       role: 'user',
       content: [
+        '角色设定：你是一位拥有10年经验的资深俄语导师，擅长化繁为简。',
         '请输出 JSON：',
         '{"learningPoints":[{"point":"...","evidence":["..."]}],"fullTranslationZh":"..."}',
         '约束：',
-        '1. learningPoints 必须 5-8 条。',
-        '2. 每条 point 不超过 80 字。',
-        '3. 每条 evidence 给出 1-3 条对应原文短句。',
-        '4. fullTranslationZh 为全文自然中文翻译。',
+        '1. learningPoints 必须是 10 条，且只能是：3条[词汇] + 3条[语法] + 3条[表达] + 1条[内容]。',
+        '2. 每条 point 必须以模块前缀开头：[词汇]/[语法]/[表达]/[内容]。',
+        '3. 每条 point 必须是可操作学习建议，不得只复述文章事实。',
+        '4. 每条 point 建议写成 1-2 句，给用户可直接练习的提示。',
+        '5. 每条 evidence 给出 1-3 条对应原文短句。',
+        '6. [内容] 条必须包含中俄双语梗概（可写 RU:... | ZH:...）。',
+        '7. [语法] 条至少1条写清主谓宾骨架与格/从句逻辑。',
+        '8. [表达] 条聚焦固定搭配/地道表达，并点出中式表达误区。',
+        '9. 必须同时基于文章整体与用户划线，优先覆盖高价值划线（isImportant=true）。',
+        '10. 若用户划线为空，请先自动挑选5个核心词再完成“关联图谱”模块。',
+        '11. fullTranslationZh 为全文自然中文翻译。',
+        previousLearningPoints.length
+          ? '12. 已提供上一版 learningPoints，尽量避免语义重复，用不同学习角度重写。'
+          : '',
+        regenerateRequestId
+          ? '13. 本次是“重新生成”，必须显著更换结构与切入角度，避免与上一版措辞相似。'
+          : '',
         `文章标题：${input.title}`,
         `文章分块总结：${JSON.stringify(chunkSummaries)}`,
+        `用户划线重点：${JSON.stringify(highlightFocus)}`,
+        previousLearningPoints.length
+          ? `上一版 learningPoints：${JSON.stringify(previousLearningPoints)}`
+          : '',
+        regenerateRequestId ? `重生成请求ID：${regenerateRequestId}` : '',
       ].join('\n'),
     },
   ];
@@ -361,7 +461,11 @@ export async function summarizeArticleWithDeepSeek(input, options = {}) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const payload = await requestAnalysis(messages, {maxTokens: 1600});
+      const payload = await requestAnalysis(messages, {
+        maxTokens: 2600,
+        temperature: input.regenerate ? 0.7 : 0.2,
+        topP: input.regenerate ? 0.95 : 0.8,
+      });
       return validateSummaryPayload(payload);
     } catch (error) {
       lastError = error;

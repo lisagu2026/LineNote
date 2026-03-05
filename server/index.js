@@ -247,9 +247,17 @@ app.post('/api/articles/analyze', async (req, res) => {
 });
 
 app.post('/api/articles/summarize', async (req, res) => {
-  const {title, content, force} = req.body ?? {};
+  const {title, content, highlights, previousLearningPoints, regenerateRequestId, force} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
+    return;
+  }
+  if (highlights != null && !Array.isArray(highlights)) {
+    res.status(400).json({error: 'highlights must be an array'});
+    return;
+  }
+  if (previousLearningPoints != null && !Array.isArray(previousLearningPoints)) {
+    res.status(400).json({error: 'previousLearningPoints must be an array'});
     return;
   }
 
@@ -258,7 +266,7 @@ app.post('/api/articles/summarize', async (req, res) => {
       mode: 'summarize',
       title,
       content,
-      highlights: [],
+      highlights: Array.isArray(highlights) ? highlights : [],
     });
     if (!force) {
       const cached = getCachedSummary(cacheKey);
@@ -271,7 +279,14 @@ app.post('/api/articles/summarize', async (req, res) => {
       }
     }
 
-    const result = await summarizeArticleWithDeepSeek({title, content});
+    const result = await summarizeArticleWithDeepSeek({
+      title,
+      content,
+      highlights: Array.isArray(highlights) ? highlights : [],
+      previousLearningPoints: Array.isArray(previousLearningPoints) ? previousLearningPoints : [],
+      regenerateRequestId,
+      regenerate: Boolean(force),
+    });
     setCachedSummary({
       cacheKey,
       mode: 'summarize',
@@ -289,9 +304,17 @@ app.post('/api/articles/summarize', async (req, res) => {
 });
 
 app.post('/api/articles/summarize-stream', async (req, res) => {
-  const {title, content, force} = req.body ?? {};
+  const {title, content, highlights, previousLearningPoints, regenerateRequestId, force} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
+    return;
+  }
+  if (highlights != null && !Array.isArray(highlights)) {
+    res.status(400).json({error: 'highlights must be an array'});
+    return;
+  }
+  if (previousLearningPoints != null && !Array.isArray(previousLearningPoints)) {
+    res.status(400).json({error: 'previousLearningPoints must be an array'});
     return;
   }
 
@@ -305,7 +328,7 @@ app.post('/api/articles/summarize-stream', async (req, res) => {
       mode: 'summarize',
       title,
       content,
-      highlights: [],
+      highlights: Array.isArray(highlights) ? highlights : [],
     });
     if (!force) {
       const cached = getCachedSummary(cacheKey);
@@ -330,7 +353,14 @@ app.post('/api/articles/summarize-stream', async (req, res) => {
     });
 
     const result = await summarizeArticleWithDeepSeek(
-      {title, content},
+      {
+        title,
+        content,
+        highlights: Array.isArray(highlights) ? highlights : [],
+        previousLearningPoints: Array.isArray(previousLearningPoints) ? previousLearningPoints : [],
+        regenerateRequestId,
+        regenerate: Boolean(force),
+      },
       {
         onProgress: (progress) => {
           if (progress.stage === 'chunking') {
@@ -346,6 +376,14 @@ app.post('/api/articles/summarize-stream', async (req, res) => {
             sendSseEvent(res, 'status', {
               stage: progress.stage,
               message: `正在处理分块 ${progress.currentChunk}/${progress.totalChunks}`,
+              ...progress,
+            });
+            return;
+          }
+          if (progress.stage === 'chunk_done') {
+            sendSseEvent(res, 'status', {
+              stage: progress.stage,
+              message: `已完成分块 ${progress.currentChunk}/${progress.totalChunks}`,
               ...progress,
             });
             return;

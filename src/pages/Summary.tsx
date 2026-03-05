@@ -10,6 +10,12 @@ import {
 import {useStore, Article, Card} from '../store';
 import {ChevronLeft, Download, ChevronDown, ChevronUp, Star, Save, Trash2} from 'lucide-react';
 
+function stripPointPrefix(point: string) {
+  return point
+    .replace(/^\[(词汇|语法|表达|内容)\]\s*/, '')
+    .trim();
+}
+
 export default function Summary() {
   const navigate = useNavigate();
   const {
@@ -38,12 +44,29 @@ export default function Summary() {
   const [sentencePairs, setSentencePairs] = useState<Array<{source: string; translationZh: string}>>([]);
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [analysisError, setAnalysisError] = useState('');
-  const [analysisProgress, setAnalysisProgress] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [deleteCardId, setDeleteCardId] = useState<string | null>(null);
   const hasAnalyzedRef = useRef(false);
   const pollingTimerRef = useRef<number | null>(null);
   const canRegenerateSummary = Boolean(activeArticleId);
+  const markdownSections = [
+    {
+      title: '词汇 (Vocabulary)',
+      items: learningPoints.filter((item) => item.startsWith('[词汇]')).map(stripPointPrefix),
+    },
+    {
+      title: '语法 (Grammar)',
+      items: learningPoints.filter((item) => item.startsWith('[语法]')).map(stripPointPrefix),
+    },
+    {
+      title: '表达 (Expression)',
+      items: learningPoints.filter((item) => item.startsWith('[表达]')).map(stripPointPrefix),
+    },
+    {
+      title: '内容 (Content)',
+      items: learningPoints.filter((item) => item.startsWith('[内容]')).map(stripPointPrefix),
+    },
+  ];
 
   useEffect(() => {
     if (hasAnalyzedRef.current) {
@@ -91,7 +114,6 @@ export default function Summary() {
   async function runAnalysis(forceRegenerate: boolean) {
     setAnalysisStatus('loading');
     setAnalysisError('');
-    setAnalysisProgress('');
 
     const sentencePromise = getSentenceTranslationsCached({content: articleText})
       .then((result) => {
@@ -113,11 +135,14 @@ export default function Summary() {
           {
             title: articleTitle || '未命名文章',
             content: articleText,
+            highlights: highlights.map((item) => ({...item})),
+            previousLearningPoints: forceRegenerate ? learningPoints : [],
+            regenerateRequestId: forceRegenerate ? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` : '',
             force: forceRegenerate,
           },
           {
-            onStatus: (status) => {
-              setAnalysisProgress(status.message || '');
+            onStatus: () => {
+              // Intentionally ignore progressive text details in UI.
             },
           },
         );
@@ -181,11 +206,9 @@ export default function Summary() {
         scheduleSentencePolling(1);
       }
       setAnalysisStatus('success');
-      setAnalysisProgress('');
     } catch (error) {
       setAnalysisStatus('error');
       setAnalysisError(error instanceof Error ? error.message : '总结生成失败');
-      setAnalysisProgress('');
     }
   }
 
@@ -312,8 +335,13 @@ export default function Summary() {
       <main className="max-w-5xl mx-auto px-4 py-8 space-y-8">
         {analysisStatus === 'loading' && (
           <section className="bg-white rounded-2xl p-6 shadow-sm border border-stone-100">
-            <p className="text-sm text-stone-500">
-              {analysisProgress || 'AI 正在生成总结，请稍候...'}
+            <p className="text-sm text-stone-600 inline-flex items-center">
+              AI 正在思考
+              <span className="inline-flex ml-1">
+                <span className="animate-pulse">.</span>
+                <span className="animate-pulse [animation-delay:180ms]">.</span>
+                <span className="animate-pulse [animation-delay:360ms]">.</span>
+              </span>
             </p>
           </section>
         )}
@@ -348,14 +376,25 @@ export default function Summary() {
               </button>
             )}
           </div>
-          <ul className="space-y-3">
-            {(learningPoints.length ? learningPoints : ['等待生成学习提要...']).map((point, idx) => (
-              <li key={idx} className="flex items-start space-x-3 text-stone-600 text-sm leading-relaxed">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-2 flex-shrink-0"></span>
-                <span>{point}</span>
-              </li>
-            ))}
-          </ul>
+          {learningPoints.length === 0 ? (
+            <p className="text-sm text-stone-500">等待生成学习提要...</p>
+          ) : (
+            <div className="rounded-xl border border-stone-200 bg-stone-50 p-5 text-sm leading-relaxed text-stone-700">
+              <h3 className="text-base font-semibold text-stone-900">本篇学习总结</h3>
+              {markdownSections.map((section) => (
+                section.items.length > 0 ? (
+                  <div key={section.title} className="mt-4">
+                    <h4 className="text-sm font-semibold text-stone-800">{section.title}</h4>
+                    <ul className="mt-2 space-y-1">
+                      {section.items.map((item, idx) => (
+                        <li key={`${section.title}-${idx}`} className="list-disc ml-5">{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">

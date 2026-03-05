@@ -37,7 +37,17 @@ export interface TranslationCacheEntry {
   updatedAt: number;
 }
 
+export interface SummaryDraft {
+  articleTitle: string;
+  articleText: string;
+  learningPoints: string[];
+  fullTranslationZh: string;
+  updatedAt: number;
+}
+
 interface AppState {
+  activeArticleId: string | null;
+  setActiveArticleId: (articleId: string | null) => void;
   articleTitle: string;
   articleText: string;
   setArticle: (title: string, text: string) => void;
@@ -51,6 +61,10 @@ interface AppState {
   translationCache: Record<string, TranslationCacheEntry>;
   setTranslationCache: (key: string, entry: Omit<TranslationCacheEntry, 'updatedAt'>) => void;
   clearTranslationCache: () => void;
+
+  summaryDraft: SummaryDraft | null;
+  setSummaryDraft: (draft: Omit<SummaryDraft, 'updatedAt'>) => void;
+  clearSummaryDraft: () => void;
   
   // Library State
   articles: Article[];
@@ -64,6 +78,8 @@ interface AppState {
 export const useStore = create<AppState>()(
   persist(
     (set) => ({
+      activeArticleId: null,
+      setActiveArticleId: (articleId) => set({ activeArticleId: articleId }),
       articleTitle: '',
       articleText: '',
       setArticle: (title, text) => set({ articleTitle: title, articleText: text }),
@@ -94,13 +110,22 @@ export const useStore = create<AppState>()(
           },
         })),
       clearTranslationCache: () => set({ translationCache: {} }),
+      summaryDraft: null,
+      setSummaryDraft: (draft) =>
+        set({
+          summaryDraft: {
+            ...draft,
+            updatedAt: Date.now(),
+          },
+        }),
+      clearSummaryDraft: () => set({ summaryDraft: null }),
       
       articles: [],
       cards: [],
       saveToLibrary: (article, newCards) =>
         set((state) => ({
-          articles: [article, ...state.articles],
-          cards: [...newCards, ...state.cards],
+          articles: [article, ...state.articles.filter((a) => a.id !== article.id)],
+          cards: [...newCards, ...state.cards.filter((c) => c.articleId !== article.id)],
         })),
       updateCard: (id, updates) =>
         set((state) => ({

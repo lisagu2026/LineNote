@@ -36,6 +36,25 @@ db.exec(`
     created_at INTEGER NOT NULL,
     FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS translation_cache (
+    cache_key TEXT PRIMARY KEY,
+    original_text TEXT NOT NULL,
+    context_sentence TEXT NOT NULL DEFAULT '',
+    translation_zh TEXT NOT NULL,
+    lemma TEXT NOT NULL DEFAULT '',
+    usage_note TEXT NOT NULL DEFAULT '',
+    example TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sentence_translation_cache (
+    sentence_key TEXT PRIMARY KEY,
+    sentence_text TEXT NOT NULL,
+    translation_zh TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 `);
 
 const selectArticles = db.prepare(`
@@ -112,6 +131,70 @@ const insertCardStmt = db.prepare(`
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
+const deleteCardsByArticleStmt = db.prepare(`
+  DELETE FROM cards WHERE article_id = ?
+`);
+
+const deleteArticleStmt = db.prepare(`
+  DELETE FROM articles WHERE id = ?
+`);
+
+const selectTranslationCacheStmt = db.prepare(`
+  SELECT
+    cache_key,
+    translation_zh,
+    lemma,
+    usage_note,
+    example,
+    note,
+    updated_at
+  FROM translation_cache
+  WHERE cache_key = ?
+`);
+
+const upsertTranslationCacheStmt = db.prepare(`
+  INSERT INTO translation_cache (
+    cache_key,
+    original_text,
+    context_sentence,
+    translation_zh,
+    lemma,
+    usage_note,
+    example,
+    note,
+    updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(cache_key) DO UPDATE SET
+    translation_zh = excluded.translation_zh,
+    lemma = excluded.lemma,
+    usage_note = excluded.usage_note,
+    example = excluded.example,
+    note = excluded.note,
+    updated_at = excluded.updated_at
+`);
+
+const selectSentenceTranslationCacheStmt = db.prepare(`
+  SELECT
+    sentence_key,
+    sentence_text,
+    translation_zh,
+    updated_at
+  FROM sentence_translation_cache
+  WHERE sentence_key = ?
+`);
+
+const upsertSentenceTranslationCacheStmt = db.prepare(`
+  INSERT INTO sentence_translation_cache (
+    sentence_key,
+    sentence_text,
+    translation_zh,
+    updated_at
+  ) VALUES (?, ?, ?, ?)
+  ON CONFLICT(sentence_key) DO UPDATE SET
+    translation_zh = excluded.translation_zh,
+    updated_at = excluded.updated_at
+`);
+
 function mapArticleRow(row) {
   return {
     id: row.id,
@@ -185,6 +268,37 @@ const insertArticleWithCards = db.transaction((article, cards) => {
   }
 });
 
+const upsertArticleWithCards = db.transaction((article, cards) => {
+  deleteCardsByArticleStmt.run(article.id);
+  deleteArticleStmt.run(article.id);
+
+  insertArticleStmt.run(
+    article.id,
+    article.title,
+    article.content,
+    JSON.stringify(article.learningPoints),
+    article.fullTranslationZh,
+    article.createdAt,
+  );
+
+  for (const card of cards) {
+    insertCardStmt.run(
+      card.id,
+      article.id,
+      card.originalText,
+      card.isImportant ? 1 : 0,
+      card.lemma,
+      card.translationZh,
+      card.usageNote,
+      card.example,
+      card.note,
+      card.start,
+      card.end,
+      card.createdAt,
+    );
+  }
+});
+
 export function createArticle(input) {
   const createdAt = input.createdAt ?? Date.now();
   const article = {
@@ -212,6 +326,119 @@ export function createArticle(input) {
 
   insertArticleWithCards(article, cards);
   return getArticleById(article.id);
+}
+
+export function upsertArticle(input) {
+  const createdAt = input.createdAt ?? Date.now();
+  const article = {
+    id: input.id,
+    title: input.title,
+    content: input.content,
+    learningPoints: input.learningPoints ?? [],
+    fullTranslationZh: input.fullTranslationZh ?? '',
+    createdAt,
+  };
+
+  const cards = (input.cards ?? []).map((card) => ({
+    id: card.id,
+    originalText: card.originalText,
+    isImportant: Boolean(card.isImportant),
+    lemma: card.lemma ?? '',
+    translationZh: card.translationZh ?? '',
+    usageNote: card.usageNote ?? '',
+    example: card.example ?? '',
+    note: card.note ?? '',
+    start: card.start ?? 0,
+    end: card.end ?? 0,
+    createdAt: card.createdAt ?? createdAt,
+  }));
+
+  upsertArticleWithCards(article, cards);
+  return getArticleById(article.id);
+}
+
+function normalizeCachePart(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+export function buildTranslationCacheKey(originalText, contextSentence = '') {
+  return `${normalizeCachePart(originalText)}::${normalizeCachePart(contextSentence)}`;
+}
+
+export function getCachedTranslation(cacheKey) {
+  const row = selectTranslationCacheStmt.get(cacheKey);
+  if (!row) {
+    return null;
+  }
+
+  return {
+    translationZh: row.translation_zh,
+    lemma: row.lemma,
+    usageNote: row.usage_note,
+    example: row.example,
+    note: row.note,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function setCachedTranslation(input) {
+  const updatedAt = Date.now();
+  upsertTranslationCacheStmt.run(
+    input.cacheKey,
+    input.originalText,
+    input.contextSentence ?? '',
+    input.translationZh,
+    input.lemma ?? '',
+    input.usageNote ?? '',
+    input.example ?? '',
+    input.note ?? '',
+    updatedAt,
+  );
+
+  return {
+    translationZh: input.translationZh,
+    lemma: input.lemma ?? '',
+    usageNote: input.usageNote ?? '',
+    example: input.example ?? '',
+    note: input.note ?? '',
+    updatedAt,
+  };
+}
+
+export function buildSentenceCacheKey(sentenceText) {
+  return normalizeCachePart(sentenceText);
+}
+
+export function getCachedSentenceTranslation(sentenceKey) {
+  const row = selectSentenceTranslationCacheStmt.get(sentenceKey);
+  if (!row) {
+    return null;
+  }
+
+  return {
+    sentenceText: row.sentence_text,
+    translationZh: row.translation_zh,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function setCachedSentenceTranslation(input) {
+  const updatedAt = Date.now();
+  upsertSentenceTranslationCacheStmt.run(
+    input.sentenceKey,
+    input.sentenceText,
+    input.translationZh,
+    updatedAt,
+  );
+
+  return {
+    sentenceText: input.sentenceText,
+    translationZh: input.translationZh,
+    updatedAt,
+  };
 }
 
 export {db, dbPath};

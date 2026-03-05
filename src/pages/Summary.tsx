@@ -1,6 +1,12 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
-import {createArticle, updateArticle, analyzeArticle, getSentenceTranslationsCached, summarizeArticle} from '../lib/api';
+import {
+  createArticle,
+  updateArticle,
+  analyzeArticle,
+  getSentenceTranslationsCached,
+  summarizeArticleStream,
+} from '../lib/api';
 import {useStore, Article, Card} from '../store';
 import {ChevronLeft, Download, ChevronDown, ChevronUp, Star, Save, Trash2} from 'lucide-react';
 
@@ -32,10 +38,12 @@ export default function Summary() {
   const [sentencePairs, setSentencePairs] = useState<Array<{source: string; translationZh: string}>>([]);
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [analysisError, setAnalysisError] = useState('');
+  const [analysisProgress, setAnalysisProgress] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [deleteCardId, setDeleteCardId] = useState<string | null>(null);
   const hasAnalyzedRef = useRef(false);
   const pollingTimerRef = useRef<number | null>(null);
+  const canRegenerateSummary = Boolean(activeArticleId);
 
   useEffect(() => {
     if (hasAnalyzedRef.current) {
@@ -83,6 +91,7 @@ export default function Summary() {
   async function runAnalysis(forceRegenerate: boolean) {
     setAnalysisStatus('loading');
     setAnalysisError('');
+    setAnalysisProgress('');
 
     const sentencePromise = getSentenceTranslationsCached({content: articleText})
       .then((result) => {
@@ -99,11 +108,19 @@ export default function Summary() {
         (item) => item.translationZh && item.lemma && item.usageNote,
       );
 
-      if (!forceRegenerate && hasReadyCardDetails) {
-        const summary = await summarizeArticle({
-          title: articleTitle || '未命名文章',
-          content: articleText,
-        });
+      if (forceRegenerate || hasReadyCardDetails) {
+        const summary = await summarizeArticleStream(
+          {
+            title: articleTitle || '未命名文章',
+            content: articleText,
+            force: forceRegenerate,
+          },
+          {
+            onStatus: (status) => {
+              setAnalysisProgress(status.message || '');
+            },
+          },
+        );
         setLearningPoints(summary.learningPoints);
         setFullTranslationZh(summary.fullTranslationZh);
         setSummaryDraft({
@@ -111,12 +128,15 @@ export default function Summary() {
           articleText,
           learningPoints: summary.learningPoints,
           fullTranslationZh: summary.fullTranslationZh,
+          learningPointEvidences: summary.learningPointEvidences ?? [],
         });
       } else {
+        const requestHighlights = highlights.map((item) => ({...item}));
         const result = await analyzeArticle({
           title: articleTitle || '未命名文章',
           content: articleText,
-          highlights,
+          highlights: requestHighlights,
+          force: forceRegenerate,
         });
 
         setLearningPoints(result.learningPoints);
@@ -126,10 +146,18 @@ export default function Summary() {
           articleText,
           learningPoints: result.learningPoints,
           fullTranslationZh: result.fullTranslationZh,
+          learningPointEvidences: [],
         });
+        const latestHighlights = useStore.getState().highlights;
+        const requestIndexById = new Map(requestHighlights.map((item, index) => [item.id, index]));
         replaceHighlights(
-          highlights.map((highlight, index) => {
-            const aiCard = result.cards[index];
+          latestHighlights.map((highlight) => {
+            const requestIndex = requestIndexById.get(highlight.id);
+            if (requestIndex === undefined) {
+              return highlight;
+            }
+
+            const aiCard = result.cards[requestIndex];
             if (!aiCard) {
               return highlight;
             }
@@ -153,9 +181,11 @@ export default function Summary() {
         scheduleSentencePolling(1);
       }
       setAnalysisStatus('success');
+      setAnalysisProgress('');
     } catch (error) {
       setAnalysisStatus('error');
       setAnalysisError(error instanceof Error ? error.message : '总结生成失败');
+      setAnalysisProgress('');
     }
   }
 
@@ -276,19 +306,15 @@ export default function Summary() {
             <Save className="w-4 h-4" />
             <span>{isSaving ? '保存中...' : '保存到知识库'}</span>
           </button>
-          <button
-            onClick={() => navigate('/reader?resume=1')}
-            className="bg-white hover:bg-stone-50 text-stone-700 border border-stone-200 px-4 py-2 rounded-full text-sm font-medium transition-colors"
-          >
-            返回继续划线
-          </button>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-8 space-y-8">
         {analysisStatus === 'loading' && (
           <section className="bg-white rounded-2xl p-6 shadow-sm border border-stone-100">
-            <p className="text-sm text-stone-500">AI 正在生成总结，请稍候...</p>
+            <p className="text-sm text-stone-500">
+              {analysisProgress || 'AI 正在生成总结，请稍候...'}
+            </p>
           </section>
         )}
 
@@ -313,12 +339,14 @@ export default function Summary() {
               <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 font-bold text-sm">A</div>
               <h2 className="text-lg font-semibold text-stone-800">本篇学习提要</h2>
             </div>
-            <button
-              onClick={handleRegenerateSummary}
-              className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-1.5 rounded-full font-medium transition-colors"
-            >
-              重新生成总结
-            </button>
+            {canRegenerateSummary && (
+              <button
+                onClick={handleRegenerateSummary}
+                className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-1.5 rounded-full font-medium transition-colors"
+              >
+                重新生成总结
+              </button>
+            )}
           </div>
           <ul className="space-y-3">
             {(learningPoints.length ? learningPoints : ['等待生成学习提要...']).map((point, idx) => (

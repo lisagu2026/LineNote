@@ -1,6 +1,41 @@
 const DEEPSEEK_API_URL = `${process.env.DEEPSEEK_API_BASE_URL ?? 'https://api.deepseek.com'}/chat/completions`;
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL ?? 'deepseek-chat';
 
+function splitSentences(text) {
+  return String(text ?? '')
+    .split(/(?<=[.!?。！？\n])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function chunkTextBySentences(content, maxChars = 1400) {
+  const sentences = splitSentences(content);
+  if (sentences.length === 0) {
+    return [];
+  }
+
+  const chunks = [];
+  let current = '';
+  for (const sentence of sentences) {
+    if (!current) {
+      current = sentence;
+      continue;
+    }
+
+    if ((current.length + sentence.length + 1) <= maxChars) {
+      current += ` ${sentence}`;
+    } else {
+      chunks.push(current);
+      current = sentence;
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+  return chunks;
+}
+
 function buildPrompt({title, content, highlights}) {
   const cards = highlights.map((item, index) => ({
     index,
@@ -36,15 +71,31 @@ function normalizeString(value, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback;
 }
 
+function validateLearningPointsRaw(input) {
+  if (!Array.isArray(input)) {
+    throw new Error('Missing learningPoints');
+  }
+
+  const cleaned = input.map((item) => normalizeString(item)).filter(Boolean);
+  if (cleaned.length < 5 || cleaned.length > 8) {
+    throw new Error('learningPoints must contain 5-8 items');
+  }
+
+  for (const point of cleaned) {
+    if (point.length > 80) {
+      throw new Error('learningPoints item exceeds 80 chars');
+    }
+  }
+
+  return cleaned;
+}
+
 function validateAnalysisPayload(payload, highlights) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new Error('DeepSeek response is not a JSON object');
   }
 
-  const learningPoints = Array.isArray(payload.learningPoints) ? payload.learningPoints : null;
-  if (!learningPoints || learningPoints.length < 1) {
-    throw new Error('Missing learningPoints');
-  }
+  const learningPoints = validateLearningPointsRaw(payload.learningPoints);
 
   const fullTranslationZh = normalizeString(payload.fullTranslationZh);
   if (!fullTranslationZh) {
@@ -57,7 +108,7 @@ function validateAnalysisPayload(payload, highlights) {
   }
 
   return {
-    learningPoints: learningPoints.map((point) => normalizeString(point)).filter(Boolean).slice(0, 8),
+    learningPoints,
     fullTranslationZh,
     cards: cards.map((card, index) => {
       const originalText = normalizeString(card?.originalText, highlights[index].originalText);
@@ -83,19 +134,38 @@ function validateSummaryPayload(payload) {
     throw new Error('DeepSeek response is not a JSON object');
   }
 
-  const learningPoints = Array.isArray(payload.learningPoints) ? payload.learningPoints : null;
-  if (!learningPoints || learningPoints.length < 1) {
+  const rawPoints = Array.isArray(payload.learningPoints) ? payload.learningPoints : null;
+  if (!rawPoints) {
     throw new Error('Missing learningPoints');
   }
+
+  const normalizedPoints = rawPoints.map((item) => {
+    if (typeof item === 'string') {
+      return {point: normalizeString(item), evidence: []};
+    }
+    const point = normalizeString(item?.point ?? item?.text ?? '');
+    const evidence = Array.isArray(item?.evidence)
+      ? item.evidence.map((snippet) => normalizeString(snippet)).filter(Boolean).slice(0, 3)
+      : [];
+    return {point, evidence};
+  });
+
+  const learningPoints = validateLearningPointsRaw(normalizedPoints.map((item) => item.point));
 
   const fullTranslationZh = normalizeString(payload.fullTranslationZh);
   if (!fullTranslationZh) {
     throw new Error('Missing fullTranslationZh');
   }
 
+  const learningPointEvidences = learningPoints.map((point, index) => ({
+    point,
+    sourceSnippets: normalizedPoints[index]?.evidence ?? [],
+  }));
+
   return {
-    learningPoints: learningPoints.map((point) => normalizeString(point)).filter(Boolean).slice(0, 8),
+    learningPoints,
     fullTranslationZh,
+    learningPointEvidences,
   };
 }
 
@@ -161,10 +231,110 @@ export async function analyzeArticleWithDeepSeek(input) {
   throw lastError instanceof Error ? lastError : new Error('DeepSeek analysis failed');
 }
 
-export async function summarizeArticleWithDeepSeek(input) {
+function validateChunkSummaryPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('DeepSeek chunk response is not a JSON object');
+  }
+
+  const chunkTranslationZh = normalizeString(payload.chunkTranslationZh || payload.translationZh);
+  if (!chunkTranslationZh) {
+    throw new Error('Missing chunkTranslationZh');
+  }
+
+  const rawPoints = Array.isArray(payload.points) ? payload.points : [];
+  const points = rawPoints
+    .map((item) => ({
+      point: normalizeString(item?.point),
+      evidence: Array.isArray(item?.evidence)
+        ? item.evidence.map((snippet) => normalizeString(snippet)).filter(Boolean).slice(0, 2)
+        : [],
+    }))
+    .filter((item) => item.point);
+
+  if (points.length < 1) {
+    throw new Error('Missing chunk points');
+  }
+
+  return {
+    chunkTranslationZh,
+    points: points.slice(0, 4),
+  };
+}
+
+async function summarizeChunkWithDeepSeek(chunk, index, totalChunks) {
+  const messages = [
+    {
+      role: 'system',
+      content:
+        '你是一个俄语阅读总结工具。你只输出严格 JSON，不解释，不使用 Markdown，不输出多余文字。',
+    },
+    {
+      role: 'user',
+      content: [
+        '请基于下面文章分块，输出 JSON：',
+        '{"chunkTranslationZh":"...","points":[{"point":"...","evidence":["..."]}]}',
+        '约束：',
+        '1. points 返回 2 到 4 条。',
+        '2. point 用中文，不超过 80 字。',
+        '3. evidence 是支持该 point 的原文短句数组（1-2条）。',
+        `当前分块：${index + 1}/${totalChunks}`,
+        `分块内容：${chunk}`,
+      ].join('\n'),
+    },
+  ];
+
+  const payload = await requestAnalysis(messages, {maxTokens: 900});
+  return validateChunkSummaryPayload(payload);
+}
+
+export async function summarizeArticleWithDeepSeek(input, options = {}) {
   if (!process.env.DEEPSEEK_API_KEY) {
     throw new Error('DEEPSEEK_API_KEY is not configured');
   }
+
+  const chunks = chunkTextBySentences(input.content, 1400);
+  if (chunks.length === 0) {
+    throw new Error('Article content is empty');
+  }
+
+  options.onProgress?.({
+    stage: 'chunking',
+    totalChunks: chunks.length,
+    doneChunks: 0,
+  });
+
+  const chunkSummaries = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    options.onProgress?.({
+      stage: 'chunk_summarizing',
+      totalChunks: chunks.length,
+      doneChunks: index,
+      currentChunk: index + 1,
+    });
+
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const summary = await summarizeChunkWithDeepSeek(chunk, index, chunks.length);
+        chunkSummaries.push(summary);
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) {
+      throw lastError instanceof Error ? lastError : new Error('Chunk summarize failed');
+    }
+  }
+
+  options.onProgress?.({
+    stage: 'synthesizing',
+    totalChunks: chunks.length,
+    doneChunks: chunks.length,
+  });
 
   const messages = [
     {
@@ -175,16 +345,30 @@ export async function summarizeArticleWithDeepSeek(input) {
     {
       role: 'user',
       content: [
-        '请输出 JSON：{"learningPoints":["..."],"fullTranslationZh":"..."}',
-        '约束：learningPoints 5-8 条，fullTranslationZh 为全文自然中文翻译。',
+        '请输出 JSON：',
+        '{"learningPoints":[{"point":"...","evidence":["..."]}],"fullTranslationZh":"..."}',
+        '约束：',
+        '1. learningPoints 必须 5-8 条。',
+        '2. 每条 point 不超过 80 字。',
+        '3. 每条 evidence 给出 1-3 条对应原文短句。',
+        '4. fullTranslationZh 为全文自然中文翻译。',
         `文章标题：${input.title}`,
-        `文章内容：${input.content}`,
+        `文章分块总结：${JSON.stringify(chunkSummaries)}`,
       ].join('\n'),
     },
   ];
 
-  const payload = await requestAnalysis(messages, {maxTokens: 1200});
-  return validateSummaryPayload(payload);
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const payload = await requestAnalysis(messages, {maxTokens: 1600});
+      return validateSummaryPayload(payload);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('DeepSeek summarize failed');
 }
 
 function validateTranslatePayload(payload) {

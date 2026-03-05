@@ -8,6 +8,7 @@ import {
   translateSentenceWithDeepSeek,
 } from './deepseek.js';
 import {
+  buildSummaryCacheKey,
   buildSentenceCacheKey,
   buildTranslationCacheKey,
   createArticle,
@@ -15,9 +16,11 @@ import {
   deleteCardById,
   dbPath,
   getArticleById,
+  getCachedSummary,
   getCachedTranslation,
   getCachedSentenceTranslation,
   listArticles,
+  setCachedSummary,
   setCachedSentenceTranslation,
   setCachedTranslation,
   updateCardById,
@@ -31,6 +34,11 @@ const app = express();
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8787);
 const preprocessingJobs = new Map();
+
+function sendSseEvent(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
 
 function splitSentences(text) {
   return String(text ?? '')
@@ -191,7 +199,7 @@ app.delete('/api/cards/:id', (req, res) => {
 });
 
 app.post('/api/articles/analyze', async (req, res) => {
-  const {title, content, highlights} = req.body ?? {};
+  const {title, content, highlights, force} = req.body ?? {};
 
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
@@ -204,8 +212,33 @@ app.post('/api/articles/analyze', async (req, res) => {
   }
 
   try {
+    const cacheKey = buildSummaryCacheKey({
+      mode: 'analyze',
+      title,
+      content,
+      highlights,
+    });
+    if (!force) {
+      const cached = getCachedSummary(cacheKey);
+      if (cached?.payload) {
+        res.json({
+          ...cached.payload,
+          cacheHit: true,
+        });
+        return;
+      }
+    }
+
     const result = await analyzeArticleWithDeepSeek({title, content, highlights});
-    res.json(result);
+    setCachedSummary({
+      cacheKey,
+      mode: 'analyze',
+      payload: result,
+    });
+    res.json({
+      ...result,
+      cacheHit: false,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'DeepSeek analysis failed';
     const status = message === 'DEEPSEEK_API_KEY is not configured' ? 503 : 502;
@@ -214,19 +247,136 @@ app.post('/api/articles/analyze', async (req, res) => {
 });
 
 app.post('/api/articles/summarize', async (req, res) => {
-  const {title, content} = req.body ?? {};
+  const {title, content, force} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
     return;
   }
 
   try {
+    const cacheKey = buildSummaryCacheKey({
+      mode: 'summarize',
+      title,
+      content,
+      highlights: [],
+    });
+    if (!force) {
+      const cached = getCachedSummary(cacheKey);
+      if (cached?.payload) {
+        res.json({
+          ...cached.payload,
+          cacheHit: true,
+        });
+        return;
+      }
+    }
+
     const result = await summarizeArticleWithDeepSeek({title, content});
-    res.json(result);
+    setCachedSummary({
+      cacheKey,
+      mode: 'summarize',
+      payload: result,
+    });
+    res.json({
+      ...result,
+      cacheHit: false,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'DeepSeek summarize failed';
     const status = message === 'DEEPSEEK_API_KEY is not configured' ? 503 : 502;
     res.status(status).json({error: message});
+  }
+});
+
+app.post('/api/articles/summarize-stream', async (req, res) => {
+  const {title, content, force} = req.body ?? {};
+  if (!title || !content) {
+    res.status(400).json({error: 'title and content are required'});
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  try {
+    const cacheKey = buildSummaryCacheKey({
+      mode: 'summarize',
+      title,
+      content,
+      highlights: [],
+    });
+    if (!force) {
+      const cached = getCachedSummary(cacheKey);
+      if (cached?.payload) {
+        sendSseEvent(res, 'status', {
+          stage: 'cache_hit',
+          message: '命中缓存，正在返回结果',
+        });
+        sendSseEvent(res, 'result', {
+          ...cached.payload,
+          cacheHit: true,
+        });
+        sendSseEvent(res, 'done', {ok: true});
+        res.end();
+        return;
+      }
+    }
+
+    sendSseEvent(res, 'status', {
+      stage: 'start',
+      message: '开始生成总结',
+    });
+
+    const result = await summarizeArticleWithDeepSeek(
+      {title, content},
+      {
+        onProgress: (progress) => {
+          if (progress.stage === 'chunking') {
+            sendSseEvent(res, 'status', {
+              stage: progress.stage,
+              message: `已切分为 ${progress.totalChunks} 个分块`,
+              ...progress,
+            });
+            return;
+          }
+
+          if (progress.stage === 'chunk_summarizing') {
+            sendSseEvent(res, 'status', {
+              stage: progress.stage,
+              message: `正在处理分块 ${progress.currentChunk}/${progress.totalChunks}`,
+              ...progress,
+            });
+            return;
+          }
+
+          sendSseEvent(res, 'status', {
+            stage: progress.stage,
+            message: '正在汇总最终结果',
+            ...progress,
+          });
+        },
+      },
+    );
+
+    setCachedSummary({
+      cacheKey,
+      mode: 'summarize',
+      payload: result,
+    });
+
+    sendSseEvent(res, 'result', {
+      ...result,
+      cacheHit: false,
+    });
+    sendSseEvent(res, 'done', {ok: true});
+    res.end();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'DeepSeek summarize failed';
+    sendSseEvent(res, 'error', {error: message});
+    sendSseEvent(res, 'done', {ok: false});
+    res.end();
   }
 });
 

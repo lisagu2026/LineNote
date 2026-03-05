@@ -42,6 +42,7 @@ export interface SummaryDraft {
   articleText: string;
   learningPoints: string[];
   fullTranslationZh: string;
+  learningPointEvidences?: Array<{point: string; sourceSnippets: string[]}>;
   updatedAt: number;
 }
 

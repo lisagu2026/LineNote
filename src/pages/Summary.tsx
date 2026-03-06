@@ -49,6 +49,13 @@ export default function Summary() {
   const hasAnalyzedRef = useRef(false);
   const pollingTimerRef = useRef<number | null>(null);
   const canRegenerateSummary = Boolean(activeArticleId);
+
+  function createArticleId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
   const markdownSections = [
     {
       title: '词汇 (Vocabulary)',
@@ -245,7 +252,7 @@ export default function Summary() {
     }
 
     setIsSaving(true);
-    const articleId = activeArticleId || Date.now().toString();
+    const articleId = activeArticleId || createArticleId();
     const existedArticle = activeArticleId ? articles.find((a) => a.id === activeArticleId) : null;
     const createdAt = existedArticle?.createdAt ?? Date.now();
     const newArticle: Article = {

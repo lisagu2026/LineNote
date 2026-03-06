@@ -1,3 +1,5 @@
+import {useStore, type AuthUser} from '../store';
+
 export interface ApiCard {
   id: string;
   articleId?: string;
@@ -54,11 +56,19 @@ export interface EnrichHighlightResult {
   cacheHit?: boolean;
 }
 
+export interface AuthResponse {
+  token: string;
+  user: AuthUser;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
 async function parseJsonResponse(response: Response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      useStore.getState().clearAuthSession();
+    }
     const message =
       typeof payload.error === 'string' ? payload.error : `Request failed with status ${response.status}`;
     throw new Error(message);
@@ -67,30 +77,86 @@ async function parseJsonResponse(response: Response) {
   return payload;
 }
 
+function getAuthHeaders(headers?: HeadersInit) {
+  const authToken = useStore.getState().authToken;
+  return {
+    ...(headers ?? {}),
+    ...(authToken ? {Authorization: `Bearer ${authToken}`} : {}),
+  };
+}
+
+async function authFetch(path: string, init?: RequestInit) {
+  const headers = getAuthHeaders(init?.headers);
+  return fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    headers,
+  });
+}
+
+export async function register(input: {email: string; password: string; displayName?: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return (await parseJsonResponse(response)) as AuthResponse;
+}
+
+export async function login(input: {email: string; password: string}) {
+  const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  return (await parseJsonResponse(response)) as AuthResponse;
+}
+
+export async function getCurrentUser() {
+  const response = await authFetch('/api/auth/me');
+  const payload = await parseJsonResponse(response);
+  return payload.user as AuthUser;
+}
+
+export async function logout() {
+  const response = await authFetch('/api/auth/logout', {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    await parseJsonResponse(response);
+  }
+}
+
 export async function fetchHealth() {
   const response = await fetch(`${API_BASE_URL}/api/health`);
   return parseJsonResponse(response);
 }
 
 export async function listArticles() {
-  const response = await fetch(`${API_BASE_URL}/api/articles`);
+  const response = await authFetch('/api/articles');
   const payload = await parseJsonResponse(response);
   return payload.items as ApiArticle[];
 }
 
 export async function listArticlesWithCards() {
-  const response = await fetch(`${API_BASE_URL}/api/articles?includeCards=1`);
+  const response = await authFetch('/api/articles?includeCards=1');
   const payload = await parseJsonResponse(response);
   return payload.items as ApiArticle[];
 }
 
 export async function getArticle(articleId: string) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`);
+  const response = await authFetch(`/api/articles/${articleId}`);
   return (await parseJsonResponse(response)) as ApiArticle;
 }
 
 export async function createArticle(article: ApiArticle) {
-  const response = await fetch(`${API_BASE_URL}/api/articles`, {
+  const response = await authFetch('/api/articles', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -102,7 +168,7 @@ export async function createArticle(article: ApiArticle) {
 }
 
 export async function updateArticle(articleId: string, article: ApiArticle) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`, {
+  const response = await authFetch(`/api/articles/${articleId}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -114,7 +180,7 @@ export async function updateArticle(articleId: string, article: ApiArticle) {
 }
 
 export async function deleteArticle(articleId: string) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/${articleId}`, {
+  const response = await authFetch(`/api/articles/${articleId}`, {
     method: 'DELETE',
   });
 
@@ -124,7 +190,7 @@ export async function deleteArticle(articleId: string) {
 }
 
 export async function updateCard(cardId: string, card: Partial<ApiCard>) {
-  const response = await fetch(`${API_BASE_URL}/api/cards/${cardId}`, {
+  const response = await authFetch(`/api/cards/${cardId}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -136,7 +202,7 @@ export async function updateCard(cardId: string, card: Partial<ApiCard>) {
 }
 
 export async function deleteCard(cardId: string) {
-  const response = await fetch(`${API_BASE_URL}/api/cards/${cardId}`, {
+  const response = await authFetch(`/api/cards/${cardId}`, {
     method: 'DELETE',
   });
 
@@ -151,7 +217,7 @@ export async function analyzeArticle(input: {
   highlights?: ApiCard[];
   force?: boolean;
 }) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/analyze`, {
+  const response = await authFetch('/api/articles/analyze', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -163,7 +229,7 @@ export async function analyzeArticle(input: {
 }
 
 export async function summarizeArticle(input: {title: string; content: string; highlights?: ApiCard[]; force?: boolean}) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/summarize`, {
+  const response = await authFetch('/api/articles/summarize', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -194,7 +260,7 @@ export async function summarizeArticleStream(
     }) => void;
   },
 ) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/summarize-stream`, {
+  const response = await authFetch('/api/articles/summarize-stream', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -266,7 +332,7 @@ export async function translateHighlight(input: {
   contextSentence?: string;
   articleContext?: string;
 }) {
-  const response = await fetch(`${API_BASE_URL}/api/highlights/translate`, {
+  const response = await authFetch('/api/highlights/translate', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -282,7 +348,7 @@ export async function enrichHighlight(input: {
   contextSentence?: string;
   translationZh?: string;
 }) {
-  const response = await fetch(`${API_BASE_URL}/api/highlights/enrich`, {
+  const response = await authFetch('/api/highlights/enrich', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -294,7 +360,7 @@ export async function enrichHighlight(input: {
 }
 
 export async function preprocessArticle(input: {content: string}) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/preprocess`, {
+  const response = await authFetch('/api/articles/preprocess', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -306,7 +372,7 @@ export async function preprocessArticle(input: {content: string}) {
 }
 
 export async function getSentenceTranslations(input: {content: string}) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/sentence-translations`, {
+  const response = await authFetch('/api/articles/sentence-translations', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -318,7 +384,7 @@ export async function getSentenceTranslations(input: {content: string}) {
 }
 
 export async function getSentenceTranslationsCached(input: {content: string}) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/sentence-translations`, {
+  const response = await authFetch('/api/articles/sentence-translations', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -330,7 +396,7 @@ export async function getSentenceTranslationsCached(input: {content: string}) {
 }
 
 export async function getPreprocessStatus(input: {content: string}) {
-  const response = await fetch(`${API_BASE_URL}/api/articles/preprocess-status`, {
+  const response = await authFetch('/api/articles/preprocess-status', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

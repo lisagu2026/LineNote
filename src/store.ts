@@ -46,7 +46,19 @@ export interface SummaryDraft {
   updatedAt: number;
 }
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  displayName: string;
+  createdAt: number;
+}
+
 interface AppState {
+  authToken: string | null;
+  authUser: AuthUser | null;
+  setAuthSession: (user: AuthUser, token: string) => void;
+  syncAuthUser: (user: AuthUser) => void;
+  clearAuthSession: () => void;
   activeArticleId: string | null;
   setActiveArticleId: (articleId: string | null) => void;
   articleTitle: string;
@@ -80,6 +92,38 @@ interface AppState {
 export const useStore = create<AppState>()(
   persist(
     (set) => ({
+      authToken: null,
+      authUser: null,
+      setAuthSession: (user, token) =>
+        set({
+          authUser: user,
+          authToken: token,
+          activeArticleId: null,
+          articleTitle: '',
+          articleText: '',
+          highlights: [],
+          summaryDraft: null,
+          articles: [],
+          cards: [],
+        }),
+      syncAuthUser: (user) =>
+        set((state) => ({
+          authUser: user,
+          authToken: state.authToken,
+        })),
+      clearAuthSession: () =>
+        set({
+          authUser: null,
+          authToken: null,
+          activeArticleId: null,
+          articleTitle: '',
+          articleText: '',
+          highlights: [],
+          translationCache: {},
+          summaryDraft: null,
+          articles: [],
+          cards: [],
+        }),
       activeArticleId: null,
       setActiveArticleId: (articleId) => set({ activeArticleId: articleId }),
       articleTitle: '',

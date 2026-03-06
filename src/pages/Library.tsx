@@ -7,13 +7,14 @@ import {
   deleteCard as deleteCardRequest,
   fetchHealth,
   listArticlesWithCards,
+  logout as logoutRequest,
   updateCard as updateCardRequest,
 } from '../lib/api';
-import { Search, Plus, ChevronRight, BookOpen, Star, LayoutGrid, CheckSquare, Square, Download, Trash2, X, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
+import { Search, Plus, ChevronRight, BookOpen, Star, LayoutGrid, CheckSquare, Square, Download, Trash2, X, ExternalLink, Maximize2, Minimize2, LogOut } from 'lucide-react';
 
 export default function Library() {
   const navigate = useNavigate();
-  const { articles, cards, replaceLibraryData, updateCard, removeArticle, removeCard } = useStore();
+  const { articles, cards, authUser, clearAuthSession, replaceLibraryData, updateCard, removeArticle, removeCard } = useStore();
   
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'articles' | 'cards'>('articles');
@@ -217,6 +218,16 @@ export default function Library() {
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await logoutRequest();
+    } catch (_error) {
+      // Clear local auth state even if the server session is already gone.
+    }
+    clearAuthSession();
+    navigate('/auth', {replace: true});
+  };
+
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 font-sans pb-20">
       {/* Top Bar */}
@@ -225,13 +236,23 @@ export default function Library() {
           <BookOpen className="w-5 h-5 text-emerald-600" />
           <span>知识库</span>
         </h1>
-        <button
-          onClick={() => navigate('/reader?new=1')}
-          className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-full text-sm font-medium transition-colors shadow-sm flex items-center space-x-1"
-        >
-          <Plus className="w-4 h-4" />
-          <span>新建/导入</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/reader?new=1')}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-full text-sm font-medium transition-colors shadow-sm flex items-center space-x-1"
+          >
+            <Plus className="w-4 h-4" />
+            <span>新建/导入</span>
+          </button>
+          <button
+            onClick={handleLogout}
+            className="rounded-full border border-stone-200 bg-white px-3 py-2 text-sm text-stone-600 transition hover:bg-stone-50 flex items-center gap-2"
+            title={authUser?.email || '退出登录'}
+          >
+            <LogOut className="w-4 h-4" />
+            <span className="hidden sm:inline">{authUser?.displayName || authUser?.email || '退出'}</span>
+          </button>
+        </div>
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-6">

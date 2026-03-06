@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import {createHash, randomBytes, scryptSync, timingSafeEqual} from 'node:crypto';
 import {
   analyzeArticleWithDeepSeek,
   enrichHighlightWithDeepSeek,
@@ -11,14 +12,19 @@ import {
   buildSummaryCacheKey,
   buildSentenceCacheKey,
   buildTranslationCacheKey,
+  createSession,
   createArticle,
+  createUser,
   deleteArticleById,
   deleteCardById,
+  deleteSessionByTokenHash,
   dbPath,
   getArticleById,
   getCachedSummary,
   getCachedTranslation,
   getCachedSentenceTranslation,
+  getSessionByTokenHash,
+  getUserByEmail,
   listArticles,
   setCachedSummary,
   setCachedSentenceTranslation,
@@ -34,6 +40,79 @@ const app = express();
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8787);
 const preprocessingJobs = new Map();
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+
+function normalizeEmail(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value));
+}
+
+function hashPassword(password) {
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  const [salt, expectedHash] = String(storedHash ?? '').split(':');
+  if (!salt || !expectedHash) {
+    return false;
+  }
+
+  const actual = scryptSync(password, salt, 64);
+  const expected = Buffer.from(expectedHash, 'hex');
+  if (actual.length !== expected.length) {
+    return false;
+  }
+
+  return timingSafeEqual(actual, expected);
+}
+
+function hashSessionToken(token) {
+  return createHash('sha256').update(String(token ?? '')).digest('hex');
+}
+
+function issueSessionToken(userId) {
+  const token = randomBytes(32).toString('hex');
+  createSession({
+    userId,
+    tokenHash: hashSessionToken(token),
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  });
+  return token;
+}
+
+function readBearerToken(req) {
+  const header = String(req.header('authorization') ?? '');
+  if (!header.startsWith('Bearer ')) {
+    return '';
+  }
+  return header.slice(7).trim();
+}
+
+function requireAuth(req, res, next) {
+  const token = readBearerToken(req);
+  if (!token) {
+    res.status(401).json({error: 'Unauthorized'});
+    return;
+  }
+
+  const session = getSessionByTokenHash(hashSessionToken(token));
+  if (!session || session.expiresAt < Date.now()) {
+    if (session) {
+      deleteSessionByTokenHash(hashSessionToken(token));
+    }
+    res.status(401).json({error: 'Unauthorized'});
+    return;
+  }
+
+  req.authUser = session.user;
+  req.authToken = token;
+  next();
+}
 
 function sendSseEvent(res, event, data) {
   res.write(`event: ${event}\n`);
@@ -70,7 +149,7 @@ async function preprocessArticleTranslations(content) {
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
 
   if (req.method === 'OPTIONS') {
@@ -92,21 +171,96 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.get('/api/articles', (req, res) => {
+app.post('/api/auth/register', (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = String(req.body?.password ?? '');
+  const displayName = String(req.body?.displayName ?? '').trim();
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({error: '请输入有效邮箱'});
+    return;
+  }
+  if (password.length < 8) {
+    res.status(400).json({error: '密码至少需要 8 位'});
+    return;
+  }
+
+  try {
+    const user = createUser({
+      email,
+      displayName,
+      passwordHash: hashPassword(password),
+    });
+    const token = issueSessionToken(user.id);
+    res.status(201).json({user, token});
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+      res.status(409).json({error: '该邮箱已注册'});
+      return;
+    }
+
+    console.error(error);
+    res.status(500).json({error: '注册失败'});
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = String(req.body?.password ?? '');
+
+  if (!isValidEmail(email) || !password) {
+    res.status(400).json({error: '请输入邮箱和密码'});
+    return;
+  }
+
+  try {
+    const user = getUserByEmail(email);
+    if (!user || !verifyPassword(password, user.passwordHash)) {
+      res.status(401).json({error: '邮箱或密码错误'});
+      return;
+    }
+
+    const token = issueSessionToken(user.id);
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: '登录失败'});
+  }
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({user: req.authUser});
+});
+
+app.post('/api/auth/logout', requireAuth, (req, res) => {
+  deleteSessionByTokenHash(hashSessionToken(req.authToken));
+  res.status(204).send();
+});
+
+app.get('/api/articles', requireAuth, (req, res) => {
   const includeCards = req.query.includeCards === '1';
-  const items = listArticles();
+  const userId = req.authUser.id;
+  const items = listArticles(userId);
 
   if (!includeCards) {
     res.json({items});
     return;
   }
 
-  const withCards = items.map((item) => getArticleById(item.id)).filter(Boolean);
+  const withCards = items.map((item) => getArticleById(item.id, userId)).filter(Boolean);
   res.json({items: withCards});
 });
 
-app.get('/api/articles/:id', (req, res) => {
-  const article = getArticleById(req.params.id);
+app.get('/api/articles/:id', requireAuth, (req, res) => {
+  const article = getArticleById(req.params.id, req.authUser.id);
   if (!article) {
     res.status(404).json({error: 'Article not found'});
     return;
@@ -115,7 +269,7 @@ app.get('/api/articles/:id', (req, res) => {
   res.json(article);
 });
 
-app.post('/api/articles', (req, res) => {
+app.post('/api/articles', requireAuth, (req, res) => {
   const {id, title, content} = req.body ?? {};
 
   if (!id || !title || !content) {
@@ -124,7 +278,7 @@ app.post('/api/articles', (req, res) => {
   }
 
   try {
-    const article = createArticle(req.body);
+    const article = createArticle(req.body, req.authUser.id);
     res.status(201).json(article);
   } catch (error) {
     if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
@@ -137,7 +291,7 @@ app.post('/api/articles', (req, res) => {
   }
 });
 
-app.put('/api/articles/:id', (req, res) => {
+app.put('/api/articles/:id', requireAuth, (req, res) => {
   const {title, content} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
@@ -148,7 +302,7 @@ app.put('/api/articles/:id', (req, res) => {
     const article = upsertArticle({
       ...req.body,
       id: req.params.id,
-    });
+    }, req.authUser.id);
     res.json(article);
   } catch (error) {
     console.error(error);
@@ -156,9 +310,9 @@ app.put('/api/articles/:id', (req, res) => {
   }
 });
 
-app.delete('/api/articles/:id', (req, res) => {
+app.delete('/api/articles/:id', requireAuth, (req, res) => {
   try {
-    const deleted = deleteArticleById(req.params.id);
+    const deleted = deleteArticleById(req.params.id, req.authUser.id);
     if (!deleted) {
       res.status(404).json({error: 'Article not found'});
       return;
@@ -170,9 +324,9 @@ app.delete('/api/articles/:id', (req, res) => {
   }
 });
 
-app.patch('/api/cards/:id', (req, res) => {
+app.patch('/api/cards/:id', requireAuth, (req, res) => {
   try {
-    const card = updateCardById(req.params.id, req.body ?? {});
+    const card = updateCardById(req.params.id, req.body ?? {}, req.authUser.id);
     if (!card) {
       res.status(404).json({error: 'Card not found'});
       return;
@@ -184,9 +338,9 @@ app.patch('/api/cards/:id', (req, res) => {
   }
 });
 
-app.delete('/api/cards/:id', (req, res) => {
+app.delete('/api/cards/:id', requireAuth, (req, res) => {
   try {
-    const deleted = deleteCardById(req.params.id);
+    const deleted = deleteCardById(req.params.id, req.authUser.id);
     if (!deleted) {
       res.status(404).json({error: 'Card not found'});
       return;
@@ -198,7 +352,7 @@ app.delete('/api/cards/:id', (req, res) => {
   }
 });
 
-app.post('/api/articles/analyze', async (req, res) => {
+app.post('/api/articles/analyze', requireAuth, async (req, res) => {
   const {title, content, highlights, force} = req.body ?? {};
 
   if (!title || !content) {
@@ -246,7 +400,7 @@ app.post('/api/articles/analyze', async (req, res) => {
   }
 });
 
-app.post('/api/articles/summarize', async (req, res) => {
+app.post('/api/articles/summarize', requireAuth, async (req, res) => {
   const {title, content, highlights, previousLearningPoints, regenerateRequestId, force} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
@@ -303,7 +457,7 @@ app.post('/api/articles/summarize', async (req, res) => {
   }
 });
 
-app.post('/api/articles/summarize-stream', async (req, res) => {
+app.post('/api/articles/summarize-stream', requireAuth, async (req, res) => {
   const {title, content, highlights, previousLearningPoints, regenerateRequestId, force} = req.body ?? {};
   if (!title || !content) {
     res.status(400).json({error: 'title and content are required'});
@@ -418,7 +572,7 @@ app.post('/api/articles/summarize-stream', async (req, res) => {
   }
 });
 
-app.post('/api/highlights/translate', async (req, res) => {
+app.post('/api/highlights/translate', requireAuth, async (req, res) => {
   const {originalText, contextSentence, articleContext} = req.body ?? {};
   if (!originalText) {
     res.status(400).json({error: 'originalText is required'});
@@ -477,7 +631,7 @@ app.post('/api/highlights/translate', async (req, res) => {
   }
 });
 
-app.post('/api/highlights/enrich', async (req, res) => {
+app.post('/api/highlights/enrich', requireAuth, async (req, res) => {
   const {originalText, contextSentence, translationZh} = req.body ?? {};
   if (!originalText) {
     res.status(400).json({error: 'originalText is required'});
@@ -533,7 +687,7 @@ app.post('/api/highlights/enrich', async (req, res) => {
   }
 });
 
-app.post('/api/articles/preprocess', (req, res) => {
+app.post('/api/articles/preprocess', requireAuth, (req, res) => {
   const {content} = req.body ?? {};
   if (!content || typeof content !== 'string') {
     res.status(400).json({error: 'content is required'});
@@ -558,7 +712,7 @@ app.post('/api/articles/preprocess', (req, res) => {
   });
 });
 
-app.post('/api/articles/preprocess-status', (req, res) => {
+app.post('/api/articles/preprocess-status', requireAuth, (req, res) => {
   const {content} = req.body ?? {};
   if (!content || typeof content !== 'string') {
     res.status(400).json({error: 'content is required'});
@@ -588,7 +742,7 @@ app.post('/api/articles/preprocess-status', (req, res) => {
   });
 });
 
-app.post('/api/articles/sentence-translations', async (req, res) => {
+app.post('/api/articles/sentence-translations', requireAuth, async (req, res) => {
   const {content, cachedOnly} = req.body ?? {};
   if (!content || typeof content !== 'string') {
     res.status(400).json({error: 'content is required'});

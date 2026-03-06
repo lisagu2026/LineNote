@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import {createHash} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -13,8 +13,26 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS articles (
     id TEXT PRIMARY KEY,
+    user_id TEXT,
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     learning_points TEXT NOT NULL DEFAULT '[]',
@@ -25,6 +43,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS cards (
     id TEXT PRIMARY KEY,
     article_id TEXT NOT NULL,
+    user_id TEXT,
     original_text TEXT NOT NULL,
     is_important INTEGER NOT NULL DEFAULT 0,
     lemma TEXT NOT NULL DEFAULT '',
@@ -65,9 +84,29 @@ db.exec(`
   );
 `);
 
+function hasColumn(tableName, columnName) {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return rows.some((row) => row.name === columnName);
+}
+
+if (!hasColumn('articles', 'user_id')) {
+  db.exec(`ALTER TABLE articles ADD COLUMN user_id TEXT`);
+}
+
+if (!hasColumn('cards', 'user_id')) {
+  db.exec(`ALTER TABLE cards ADD COLUMN user_id TEXT`);
+}
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_articles_user_id ON articles(user_id);
+  CREATE INDEX IF NOT EXISTS idx_cards_user_id ON cards(user_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+`);
+
 const selectArticles = db.prepare(`
   SELECT
     a.id,
+    a.user_id,
     a.title,
     a.content,
     a.learning_points,
@@ -76,6 +115,7 @@ const selectArticles = db.prepare(`
     COUNT(c.id) AS card_count
   FROM articles a
   LEFT JOIN cards c ON c.article_id = a.id
+  WHERE a.user_id = ?
   GROUP BY a.id
   ORDER BY a.created_at DESC
 `);
@@ -83,19 +123,21 @@ const selectArticles = db.prepare(`
 const selectArticle = db.prepare(`
   SELECT
     id,
+    user_id,
     title,
     content,
     learning_points,
     full_translation_zh,
     created_at
   FROM articles
-  WHERE id = ?
+  WHERE id = ? AND user_id = ?
 `);
 
 const selectCardsByArticle = db.prepare(`
   SELECT
     id,
     article_id,
+    user_id,
     original_text,
     is_important,
     lemma,
@@ -107,25 +149,27 @@ const selectCardsByArticle = db.prepare(`
     end_offset,
     created_at
   FROM cards
-  WHERE article_id = ?
+  WHERE article_id = ? AND user_id = ?
   ORDER BY created_at DESC
 `);
 
 const insertArticleStmt = db.prepare(`
   INSERT INTO articles (
     id,
+    user_id,
     title,
     content,
     learning_points,
     full_translation_zh,
     created_at
-  ) VALUES (?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 
 const insertCardStmt = db.prepare(`
   INSERT INTO cards (
     id,
     article_id,
+    user_id,
     original_text,
     is_important,
     lemma,
@@ -136,19 +180,19 @@ const insertCardStmt = db.prepare(`
     start_offset,
     end_offset,
     created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const deleteCardsByArticleStmt = db.prepare(`
-  DELETE FROM cards WHERE article_id = ?
+  DELETE FROM cards WHERE article_id = ? AND user_id = ?
 `);
 
 const deleteArticleStmt = db.prepare(`
-  DELETE FROM articles WHERE id = ?
+  DELETE FROM articles WHERE id = ? AND user_id = ?
 `);
 
 const deleteCardStmt = db.prepare(`
-  DELETE FROM cards WHERE id = ?
+  DELETE FROM cards WHERE id = ? AND user_id = ?
 `);
 
 const updateCardStmt = db.prepare(`
@@ -162,13 +206,14 @@ const updateCardStmt = db.prepare(`
     note = ?,
     start_offset = ?,
     end_offset = ?
-  WHERE id = ?
+  WHERE id = ? AND user_id = ?
 `);
 
 const selectCardByIdStmt = db.prepare(`
   SELECT
     id,
     article_id,
+    user_id,
     original_text,
     is_important,
     lemma,
@@ -180,7 +225,68 @@ const selectCardByIdStmt = db.prepare(`
     end_offset,
     created_at
   FROM cards
+  WHERE id = ? AND user_id = ?
+`);
+
+const insertUserStmt = db.prepare(`
+  INSERT INTO users (
+    id,
+    email,
+    display_name,
+    password_hash,
+    created_at
+  ) VALUES (?, ?, ?, ?, ?)
+`);
+
+const selectUserByEmailStmt = db.prepare(`
+  SELECT
+    id,
+    email,
+    display_name,
+    password_hash,
+    created_at
+  FROM users
+  WHERE email = ?
+`);
+
+const selectUserByIdStmt = db.prepare(`
+  SELECT
+    id,
+    email,
+    display_name,
+    password_hash,
+    created_at
+  FROM users
   WHERE id = ?
+`);
+
+const insertSessionStmt = db.prepare(`
+  INSERT INTO sessions (
+    id,
+    user_id,
+    token_hash,
+    expires_at,
+    created_at
+  ) VALUES (?, ?, ?, ?, ?)
+`);
+
+const selectSessionByTokenHashStmt = db.prepare(`
+  SELECT
+    s.id,
+    s.user_id,
+    s.expires_at,
+    s.created_at,
+    u.id AS auth_user_id,
+    u.email,
+    u.display_name,
+    u.created_at AS user_created_at
+  FROM sessions s
+  JOIN users u ON u.id = s.user_id
+  WHERE s.token_hash = ?
+`);
+
+const deleteSessionByTokenHashStmt = db.prepare(`
+  DELETE FROM sessions WHERE token_hash = ?
 `);
 
 const selectTranslationCacheStmt = db.prepare(`
@@ -290,25 +396,35 @@ function mapCardRow(row) {
   };
 }
 
-export function listArticles() {
-  return selectArticles.all().map(mapArticleRow);
+function mapUserRow(row) {
+  return {
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name,
+    createdAt: row.created_at ?? row.user_created_at,
+  };
 }
 
-export function getArticleById(articleId) {
-  const article = selectArticle.get(articleId);
+export function listArticles(userId) {
+  return selectArticles.all(userId).map(mapArticleRow);
+}
+
+export function getArticleById(articleId, userId) {
+  const article = selectArticle.get(articleId, userId);
   if (!article) {
     return null;
   }
 
   return {
     ...mapArticleRow(article),
-    cards: selectCardsByArticle.all(articleId).map(mapCardRow),
+    cards: selectCardsByArticle.all(articleId, userId).map(mapCardRow),
   };
 }
 
 const insertArticleWithCards = db.transaction((article, cards) => {
   insertArticleStmt.run(
     article.id,
+    article.userId,
     article.title,
     article.content,
     JSON.stringify(article.learningPoints),
@@ -320,6 +436,7 @@ const insertArticleWithCards = db.transaction((article, cards) => {
     insertCardStmt.run(
       card.id,
       article.id,
+      article.userId,
       card.originalText,
       card.isImportant ? 1 : 0,
       card.lemma,
@@ -335,11 +452,12 @@ const insertArticleWithCards = db.transaction((article, cards) => {
 });
 
 const upsertArticleWithCards = db.transaction((article, cards) => {
-  deleteCardsByArticleStmt.run(article.id);
-  deleteArticleStmt.run(article.id);
+  deleteCardsByArticleStmt.run(article.id, article.userId);
+  deleteArticleStmt.run(article.id, article.userId);
 
   insertArticleStmt.run(
     article.id,
+    article.userId,
     article.title,
     article.content,
     JSON.stringify(article.learningPoints),
@@ -351,6 +469,7 @@ const upsertArticleWithCards = db.transaction((article, cards) => {
     insertCardStmt.run(
       card.id,
       article.id,
+      article.userId,
       card.originalText,
       card.isImportant ? 1 : 0,
       card.lemma,
@@ -365,10 +484,11 @@ const upsertArticleWithCards = db.transaction((article, cards) => {
   }
 });
 
-export function createArticle(input) {
+export function createArticle(input, userId) {
   const createdAt = input.createdAt ?? Date.now();
   const article = {
     id: input.id,
+    userId,
     title: input.title,
     content: input.content,
     learningPoints: input.learningPoints ?? [],
@@ -391,13 +511,14 @@ export function createArticle(input) {
   }));
 
   insertArticleWithCards(article, cards);
-  return getArticleById(article.id);
+  return getArticleById(article.id, userId);
 }
 
-export function upsertArticle(input) {
+export function upsertArticle(input, userId) {
   const createdAt = input.createdAt ?? Date.now();
   const article = {
     id: input.id,
+    userId,
     title: input.title,
     content: input.content,
     learningPoints: input.learningPoints ?? [],
@@ -420,21 +541,21 @@ export function upsertArticle(input) {
   }));
 
   upsertArticleWithCards(article, cards);
-  return getArticleById(article.id);
+  return getArticleById(article.id, userId);
 }
 
-export function deleteArticleById(articleId) {
-  const result = deleteArticleStmt.run(articleId);
+export function deleteArticleById(articleId, userId) {
+  const result = deleteArticleStmt.run(articleId, userId);
   return result.changes > 0;
 }
 
-export function deleteCardById(cardId) {
-  const result = deleteCardStmt.run(cardId);
+export function deleteCardById(cardId, userId) {
+  const result = deleteCardStmt.run(cardId, userId);
   return result.changes > 0;
 }
 
-export function updateCardById(cardId, updates = {}) {
-  const current = selectCardByIdStmt.get(cardId);
+export function updateCardById(cardId, updates = {}, userId) {
+  const current = selectCardByIdStmt.get(cardId, userId);
   if (!current) {
     return null;
   }
@@ -449,10 +570,88 @@ export function updateCardById(cardId, updates = {}) {
     updates.start ?? current.start_offset,
     updates.end ?? current.end_offset,
     cardId,
+    userId,
   );
 
-  const updated = selectCardByIdStmt.get(cardId);
+  const updated = selectCardByIdStmt.get(cardId, userId);
   return updated ? mapCardRow(updated) : null;
+}
+
+export function createUser(input) {
+  const now = Date.now();
+  const id = randomUUID();
+  insertUserStmt.run(
+    id,
+    String(input.email).trim().toLowerCase(),
+    input.displayName ?? '',
+    input.passwordHash,
+    now,
+  );
+
+  return getUserById(id);
+}
+
+export function getUserByEmail(email) {
+  const row = selectUserByEmailStmt.get(String(email ?? '').trim().toLowerCase());
+  if (!row) {
+    return null;
+  }
+
+  return {
+    ...mapUserRow(row),
+    passwordHash: row.password_hash,
+  };
+}
+
+export function getUserById(userId) {
+  const row = selectUserByIdStmt.get(userId);
+  return row ? mapUserRow(row) : null;
+}
+
+export function createSession(input) {
+  const now = Date.now();
+  const session = {
+    id: randomUUID(),
+    userId: input.userId,
+    tokenHash: input.tokenHash,
+    expiresAt: input.expiresAt,
+    createdAt: now,
+  };
+
+  insertSessionStmt.run(
+    session.id,
+    session.userId,
+    session.tokenHash,
+    session.expiresAt,
+    session.createdAt,
+  );
+
+  return session;
+}
+
+export function getSessionByTokenHash(tokenHash) {
+  const row = selectSessionByTokenHashStmt.get(tokenHash);
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.user_id,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    user: {
+      id: row.auth_user_id,
+      email: row.email,
+      displayName: row.display_name,
+      createdAt: row.user_created_at,
+    },
+  };
+}
+
+export function deleteSessionByTokenHash(tokenHash) {
+  const result = deleteSessionByTokenHashStmt.run(tokenHash);
+  return result.changes > 0;
 }
 
 function normalizeCachePart(value) {

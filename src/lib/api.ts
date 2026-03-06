@@ -21,6 +21,14 @@ export interface ApiArticle {
   content: string;
   learningPoints: string[];
   fullTranslationZh: string;
+  summaryVersions?: Array<{
+    id: string;
+    label: string;
+    learningPoints: string[];
+    fullTranslationZh: string;
+    learningPointEvidences?: Array<{point: string; sourceSnippets: string[]}>;
+  }>;
+  selectedSummaryVersionId?: string;
   createdAt: number;
   cardCount?: number;
   cards?: ApiCard[];

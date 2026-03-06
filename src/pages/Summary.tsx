@@ -10,10 +10,35 @@ import {
 import {useStore, Article, Card} from '../store';
 import {ChevronLeft, Download, ChevronDown, ChevronUp, Star, Save, Trash2} from 'lucide-react';
 
+type SummaryVersion = {
+  id: string;
+  label: string;
+  learningPoints: string[];
+  fullTranslationZh: string;
+  learningPointEvidences?: Array<{point: string; sourceSnippets: string[]}>;
+};
+
 function stripPointPrefix(point: string) {
   return point
-    .replace(/^\[(词汇|语法|表达|内容)\]\s*/, '')
+    .replace(/^\[[^\]]+\]\s*/, '')
     .trim();
+}
+
+function createSummaryVersion(input: {
+  learningPoints: string[];
+  fullTranslationZh: string;
+  learningPointEvidences?: Array<{point: string; sourceSnippets: string[]}>;
+  label: string;
+}): SummaryVersion {
+  return {
+    id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    label: input.label,
+    learningPoints: input.learningPoints,
+    fullTranslationZh: input.fullTranslationZh,
+    learningPointEvidences: input.learningPointEvidences ?? [],
+  };
 }
 
 export default function Summary() {
@@ -39,8 +64,8 @@ export default function Summary() {
 
   const [isTranslationOpen, setIsTranslationOpen] = useState(true);
   const [showTranslation, setShowTranslation] = useState(true);
-  const [learningPoints, setLearningPoints] = useState<string[]>([]);
-  const [fullTranslationZh, setFullTranslationZh] = useState('');
+  const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
+  const [selectedSummaryVersionId, setSelectedSummaryVersionId] = useState<string | null>(null);
   const [sentencePairs, setSentencePairs] = useState<Array<{source: string; translationZh: string}>>([]);
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [analysisError, setAnalysisError] = useState('');
@@ -56,6 +81,12 @@ export default function Summary() {
     }
     return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
+  const currentSummaryVersion =
+    summaryVersions.find((item) => item.id === selectedSummaryVersionId) ??
+    summaryVersions[summaryVersions.length - 1] ??
+    null;
+  const learningPoints = currentSummaryVersion?.learningPoints ?? [];
+  const fullTranslationZh = currentSummaryVersion?.fullTranslationZh ?? '';
   const markdownSections = [
     {
       title: '词汇 (Vocabulary)',
@@ -72,6 +103,12 @@ export default function Summary() {
     {
       title: '内容 (Content)',
       items: learningPoints.filter((item) => item.startsWith('[内容]')).map(stripPointPrefix),
+    },
+    {
+      title: '学习要点',
+      items: learningPoints
+        .filter((item) => !/^\[(词汇|语法|表达|内容)\]/.test(item))
+        .map(stripPointPrefix),
     },
   ];
 
@@ -91,8 +128,22 @@ export default function Summary() {
       summaryDraft.articleText === articleText;
 
     if (hasCachedDraft) {
-      setLearningPoints(summaryDraft.learningPoints);
-      setFullTranslationZh(summaryDraft.fullTranslationZh);
+      const nextVersions = summaryDraft.summaryVersions?.length
+        ? summaryDraft.summaryVersions
+        : [
+            createSummaryVersion({
+              label: '版本 1',
+              learningPoints: summaryDraft.learningPoints,
+              fullTranslationZh: summaryDraft.fullTranslationZh,
+              learningPointEvidences: summaryDraft.learningPointEvidences ?? [],
+            }),
+          ];
+      setSummaryVersions(nextVersions);
+      setSelectedSummaryVersionId(
+        summaryDraft.selectedSummaryVersionId && nextVersions.some((item) => item.id === summaryDraft.selectedSummaryVersionId)
+          ? summaryDraft.selectedSummaryVersionId
+          : nextVersions[nextVersions.length - 1]?.id ?? null,
+      );
       setAnalysisStatus('success');
       void getSentenceTranslationsCached({content: articleText})
         .then((result) => {
@@ -143,7 +194,7 @@ export default function Summary() {
             title: articleTitle || '未命名文章',
             content: articleText,
             highlights: highlights.map((item) => ({...item})),
-            previousLearningPoints: forceRegenerate ? learningPoints : [],
+            previousLearningPoints: forceRegenerate ? (currentSummaryVersion?.learningPoints ?? []) : [],
             regenerateRequestId: forceRegenerate ? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` : '',
             force: forceRegenerate,
           },
@@ -153,14 +204,23 @@ export default function Summary() {
             },
           },
         );
-        setLearningPoints(summary.learningPoints);
-        setFullTranslationZh(summary.fullTranslationZh);
-        setSummaryDraft({
-          articleTitle: articleTitle || '未命名文章',
-          articleText,
+        const nextVersion = createSummaryVersion({
+          label: `版本 ${forceRegenerate ? summaryVersions.length + 1 : 1}`,
           learningPoints: summary.learningPoints,
           fullTranslationZh: summary.fullTranslationZh,
           learningPointEvidences: summary.learningPointEvidences ?? [],
+        });
+        const nextVersions = forceRegenerate ? [...summaryVersions, nextVersion] : [nextVersion];
+        setSummaryVersions(nextVersions);
+        setSelectedSummaryVersionId(nextVersion.id);
+        setSummaryDraft({
+          articleTitle: articleTitle || '未命名文章',
+          articleText,
+          learningPoints: nextVersion.learningPoints,
+          fullTranslationZh: nextVersion.fullTranslationZh,
+          learningPointEvidences: nextVersion.learningPointEvidences ?? [],
+          summaryVersions: nextVersions,
+          selectedSummaryVersionId: nextVersion.id,
         });
       } else {
         const requestHighlights = highlights.map((item) => ({...item}));
@@ -171,14 +231,22 @@ export default function Summary() {
           force: forceRegenerate,
         });
 
-        setLearningPoints(result.learningPoints);
-        setFullTranslationZh(result.fullTranslationZh);
-        setSummaryDraft({
-          articleTitle: articleTitle || '未命名文章',
-          articleText,
+        const nextVersion = createSummaryVersion({
+          label: '版本 1',
           learningPoints: result.learningPoints,
           fullTranslationZh: result.fullTranslationZh,
           learningPointEvidences: [],
+        });
+        setSummaryVersions([nextVersion]);
+        setSelectedSummaryVersionId(nextVersion.id);
+        setSummaryDraft({
+          articleTitle: articleTitle || '未命名文章',
+          articleText,
+          learningPoints: nextVersion.learningPoints,
+          fullTranslationZh: nextVersion.fullTranslationZh,
+          learningPointEvidences: [],
+          summaryVersions: [nextVersion],
+          selectedSummaryVersionId: nextVersion.id,
         });
         const latestHighlights = useStore.getState().highlights;
         const requestIndexById = new Map(requestHighlights.map((item, index) => [item.id, index]));
@@ -224,7 +292,6 @@ export default function Summary() {
     if (!confirmed) {
       return;
     }
-    clearSummaryDraft();
     void runAnalysis(true);
   }
 
@@ -247,7 +314,7 @@ export default function Summary() {
   }
 
   async function handleSaveToLibrary() {
-    if (analysisStatus !== 'success') {
+    if (analysisStatus !== 'success' || !currentSummaryVersion) {
       return;
     }
 
@@ -259,8 +326,10 @@ export default function Summary() {
       id: articleId,
       title: articleTitle || '未命名文章',
       content: articleText,
-      learningPoints,
-      fullTranslationZh,
+      learningPoints: currentSummaryVersion.learningPoints,
+      fullTranslationZh: currentSummaryVersion.fullTranslationZh,
+      summaryVersions,
+      selectedSummaryVersionId,
       createdAt,
     };
 
@@ -383,6 +452,34 @@ export default function Summary() {
               </button>
             )}
           </div>
+          {summaryVersions.length > 1 && (
+            <div className="mb-4 flex flex-wrap gap-2">
+              {summaryVersions.map((version) => (
+                <button
+                  key={version.id}
+                  onClick={() => {
+                    setSelectedSummaryVersionId(version.id);
+                    setSummaryDraft({
+                      articleTitle: articleTitle || '未命名文章',
+                      articleText,
+                      learningPoints: version.learningPoints,
+                      fullTranslationZh: version.fullTranslationZh,
+                      learningPointEvidences: version.learningPointEvidences ?? [],
+                      summaryVersions,
+                      selectedSummaryVersionId: version.id,
+                    });
+                  }}
+                  className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                    version.id === selectedSummaryVersionId
+                      ? 'bg-stone-900 text-white'
+                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                  }`}
+                >
+                  {version.label}
+                </button>
+              ))}
+            </div>
+          )}
           {learningPoints.length === 0 ? (
             <p className="text-sm text-stone-500">等待生成学习提要...</p>
           ) : (

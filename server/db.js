@@ -37,6 +37,8 @@ db.exec(`
     content TEXT NOT NULL,
     learning_points TEXT NOT NULL DEFAULT '[]',
     full_translation_zh TEXT NOT NULL DEFAULT '',
+    summary_versions_json TEXT NOT NULL DEFAULT '[]',
+    selected_summary_version_id TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
   );
 
@@ -93,6 +95,14 @@ if (!hasColumn('articles', 'user_id')) {
   db.exec(`ALTER TABLE articles ADD COLUMN user_id TEXT`);
 }
 
+if (!hasColumn('articles', 'summary_versions_json')) {
+  db.exec(`ALTER TABLE articles ADD COLUMN summary_versions_json TEXT NOT NULL DEFAULT '[]'`);
+}
+
+if (!hasColumn('articles', 'selected_summary_version_id')) {
+  db.exec(`ALTER TABLE articles ADD COLUMN selected_summary_version_id TEXT NOT NULL DEFAULT ''`);
+}
+
 if (!hasColumn('cards', 'user_id')) {
   db.exec(`ALTER TABLE cards ADD COLUMN user_id TEXT`);
 }
@@ -111,6 +121,8 @@ const selectArticles = db.prepare(`
     a.content,
     a.learning_points,
     a.full_translation_zh,
+    a.summary_versions_json,
+    a.selected_summary_version_id,
     a.created_at,
     COUNT(c.id) AS card_count
   FROM articles a
@@ -128,6 +140,8 @@ const selectArticle = db.prepare(`
     content,
     learning_points,
     full_translation_zh,
+    summary_versions_json,
+    selected_summary_version_id,
     created_at
   FROM articles
   WHERE id = ? AND user_id = ?
@@ -161,8 +175,10 @@ const insertArticleStmt = db.prepare(`
     content,
     learning_points,
     full_translation_zh,
+    summary_versions_json,
+    selected_summary_version_id,
     created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const insertCardStmt = db.prepare(`
@@ -367,13 +383,43 @@ const upsertSummaryCacheStmt = db.prepare(`
     updated_at = excluded.updated_at
 `);
 
+function safeJsonParseArray(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function mapArticleRow(row) {
+  const learningPoints = safeJsonParseArray(row.learning_points);
+  const parsedSummaryVersions = safeJsonParseArray(row.summary_versions_json);
+  const fallbackVersionId = `saved-${row.id}-v1`;
+  const summaryVersions = parsedSummaryVersions.length > 0
+    ? parsedSummaryVersions
+    : [
+        {
+          id: fallbackVersionId,
+          label: '版本 1',
+          learningPoints,
+          fullTranslationZh: row.full_translation_zh,
+          learningPointEvidences: [],
+        },
+      ];
+  const selectedSummaryVersionId =
+    summaryVersions.some((item) => item.id === row.selected_summary_version_id)
+      ? row.selected_summary_version_id
+      : summaryVersions[summaryVersions.length - 1]?.id ?? fallbackVersionId;
+
   return {
     id: row.id,
     title: row.title,
     content: row.content,
-    learningPoints: JSON.parse(row.learning_points),
+    learningPoints,
     fullTranslationZh: row.full_translation_zh,
+    summaryVersions,
+    selectedSummaryVersionId,
     createdAt: row.created_at,
     cardCount: row.card_count ?? undefined,
   };
@@ -429,6 +475,8 @@ const insertArticleWithCards = db.transaction((article, cards) => {
     article.content,
     JSON.stringify(article.learningPoints),
     article.fullTranslationZh,
+    JSON.stringify(article.summaryVersions),
+    article.selectedSummaryVersionId,
     article.createdAt,
   );
 
@@ -462,6 +510,8 @@ const upsertArticleWithCards = db.transaction((article, cards) => {
     article.content,
     JSON.stringify(article.learningPoints),
     article.fullTranslationZh,
+    JSON.stringify(article.summaryVersions),
+    article.selectedSummaryVersionId,
     article.createdAt,
   );
 
@@ -493,6 +543,8 @@ export function createArticle(input, userId) {
     content: input.content,
     learningPoints: input.learningPoints ?? [],
     fullTranslationZh: input.fullTranslationZh ?? '',
+    summaryVersions: input.summaryVersions ?? [],
+    selectedSummaryVersionId: input.selectedSummaryVersionId ?? '',
     createdAt,
   };
 
@@ -523,6 +575,8 @@ export function upsertArticle(input, userId) {
     content: input.content,
     learningPoints: input.learningPoints ?? [],
     fullTranslationZh: input.fullTranslationZh ?? '',
+    summaryVersions: input.summaryVersions ?? [],
+    selectedSummaryVersionId: input.selectedSummaryVersionId ?? '',
     createdAt,
   };
 

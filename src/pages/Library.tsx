@@ -57,6 +57,8 @@ export default function Library() {
           content: item.content,
           learningPoints: item.learningPoints,
           fullTranslationZh: item.fullTranslationZh,
+          summaryVersions: item.summaryVersions,
+          selectedSummaryVersionId: item.selectedSummaryVersionId,
           createdAt: item.createdAt,
         }));
 

@@ -17,6 +17,7 @@ export default function ArticleDetail() {
   const [deleteCardId, setDeleteCardId] = useState<string | null>(null);
   const [sentencePairs, setSentencePairs] = useState<Array<{source: string; translationZh: string}>>([]);
   const [showTranslation, setShowTranslation] = useState(true);
+  const [selectedSummaryVersionId, setSelectedSummaryVersionId] = useState<string | null>(null);
   const [remoteArticle, setRemoteArticle] = useState<(typeof articles)[number] | null>(null);
   const [remoteCards, setRemoteCards] = useState<typeof cards>([]);
   const [loadingRemote, setLoadingRemote] = useState(false);
@@ -30,6 +31,22 @@ export default function ArticleDetail() {
     .sort((a, b) => Number(b.isImportant) - Number(a.isImportant));
   const activeArticle = article ?? remoteArticle;
   const activeCards = article ? articleCards : [...remoteCards].sort((a, b) => Number(b.isImportant) - Number(a.isImportant));
+  const summaryVersions = activeArticle?.summaryVersions?.length
+    ? activeArticle.summaryVersions
+    : activeArticle
+      ? [{
+          id: `saved-${activeArticle.id}-v1`,
+          label: '版本 1',
+          learningPoints: activeArticle.learningPoints,
+          fullTranslationZh: activeArticle.fullTranslationZh,
+          learningPointEvidences: [],
+        }]
+      : [];
+  const currentSummaryVersion =
+    summaryVersions.find((item) => item.id === selectedSummaryVersionId) ??
+    summaryVersions[summaryVersions.length - 1] ??
+    null;
+  const displayedLearningPoints = currentSummaryVersion?.learningPoints ?? activeArticle?.learningPoints ?? [];
 
   const [isTranslationOpen, setIsTranslationOpen] = useState(true);
   const [isPointsOpen, setIsPointsOpen] = useState(true);
@@ -56,6 +73,12 @@ export default function ArticleDetail() {
       articleText: activeArticle.content,
       learningPoints: activeArticle.learningPoints,
       fullTranslationZh: activeArticle.fullTranslationZh,
+      summaryVersions,
+      selectedSummaryVersionId:
+        selectedSummaryVersionId ||
+        activeArticle.selectedSummaryVersionId ||
+        summaryVersions[summaryVersions.length - 1]?.id ||
+        `saved-${activeArticle.id}-v1`,
     });
     replaceHighlights(sessionHighlights);
     navigate('/reader?resume=1');
@@ -75,6 +98,8 @@ export default function ArticleDetail() {
           content: result.content,
           learningPoints: result.learningPoints,
           fullTranslationZh: result.fullTranslationZh,
+          summaryVersions: result.summaryVersions,
+          selectedSummaryVersionId: result.selectedSummaryVersionId,
           createdAt: result.createdAt,
         });
 
@@ -107,6 +132,19 @@ export default function ArticleDetail() {
       saveTimersRef.current = {};
     };
   }, []);
+
+  useEffect(() => {
+    if (!activeArticle) {
+      setSelectedSummaryVersionId(null);
+      return;
+    }
+
+    const nextSelected =
+      activeArticle.selectedSummaryVersionId && summaryVersions.some((item) => item.id === activeArticle.selectedSummaryVersionId)
+        ? activeArticle.selectedSummaryVersionId
+        : summaryVersions[summaryVersions.length - 1]?.id ?? null;
+    setSelectedSummaryVersionId(nextSelected);
+  }, [activeArticle?.id, activeArticle?.selectedSummaryVersionId, summaryVersions]);
 
   useEffect(() => {
     if (!activeArticle?.content) {
@@ -256,8 +294,25 @@ export default function ArticleDetail() {
 
           {isPointsOpen && (
             <div className="p-6 border-t border-stone-100">
+              {summaryVersions.length > 1 && (
+                <div className="mb-4 flex flex-wrap gap-2">
+                  {summaryVersions.map((version) => (
+                    <button
+                      key={version.id}
+                      onClick={() => setSelectedSummaryVersionId(version.id)}
+                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                        version.id === selectedSummaryVersionId
+                          ? 'bg-stone-900 text-white'
+                          : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      }`}
+                    >
+                      {version.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <ul className="space-y-3">
-                {activeArticle?.learningPoints.map((point, idx) => (
+                {displayedLearningPoints.map((point, idx) => (
                   <li key={idx} className="flex items-start space-x-3 text-stone-600 text-sm leading-relaxed">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-2 flex-shrink-0"></span>
                     <span>{point}</span>
@@ -292,7 +347,7 @@ export default function ArticleDetail() {
                 显示翻译
               </label>
               <div className="space-y-3">
-                {(sentencePairs.length ? sentencePairs : [{source: activeArticle?.content || '', translationZh: activeArticle?.fullTranslationZh || ''}]).map((pair, idx) => (
+                {(sentencePairs.length ? sentencePairs : [{source: activeArticle?.content || '', translationZh: currentSummaryVersion?.fullTranslationZh || activeArticle?.fullTranslationZh || ''}]).map((pair, idx) => (
                   <div key={`${idx}-${pair.source.slice(0, 8)}`} className="rounded-xl border border-stone-100 bg-stone-50 p-3">
                     <p className="text-stone-800 leading-relaxed text-sm font-serif">{pair.source}</p>
                     {showTranslation && (

@@ -72,19 +72,16 @@ function buildPrompt({title, content, highlights}) {
     'JSON 结构必须是：',
     '{"learningPoints":["..."],"fullTranslationZh":"...","cards":[{"originalText":"...","lemma":"...","translationZh":"...","usageNote":"...","example":"...","note":"...","isImportant":true}]}',
     '约束：',
-    '1. learningPoints 返回 8 到 12 条，尽量详细、具有学习步骤感。',
-    '2. learningPoints 需覆盖四个模块：',
-    '   - 一句话梗概(Краткое содержание)：给出中俄双语主旨（可用“RU:... | ZH:...”）。',
-    '   - 核心句法拆解(Синтаксический анализ)：至少 1 条，包含“原句+主谓宾骨架+格/从句逻辑”。',
-    '   - 划线词关联图谱(Связи подчеркнутых слов)：说明划线词如何按语义/语法成组出现。',
-    '   - 俄语地道表达说(Живая речь)：至少 2 条，突出中式俄语与地道俄语差异。',
-    '3. 若未提供有效划线词，请先从原文自动挑选 5 个核心词再做“关联图谱”。',
-    '4. fullTranslationZh 必须是整篇文章的自然中文翻译。',
-    '5. cards 数量必须与输入 highlights 完全一致，顺序也必须一致。',
-    '6. cards 里的 originalText 必须与输入中的 originalText 完全一致。',
-    '7. usageNote 必须简短，控制在一行内。',
-    '8. example 如果无必要可为空字符串，note 可以为空字符串。',
-    '9. isImportant 根据学习价值判断 true 或 false。',
+    '1. learningPoints 返回 6 到 10 条，尽量详细、具有学习步骤感。',
+    '2. 总结应以语言学习价值为主，优先覆盖词汇、语法、表达，也可以加入内容梗概、句法拆解、搭配观察等角度。',
+    '3. 如果你使用模块前缀，可选用 [词汇]/[语法]/[表达]/[内容]；不强制每条都带前缀。',
+    '4. 若未提供有效划线词，请先从原文自动挑选 3 到 5 个核心词再做学习总结。',
+    '5. fullTranslationZh 必须是整篇文章的自然中文翻译。',
+    '6. cards 数量必须与输入 highlights 完全一致，顺序也必须一致。',
+    '7. cards 里的 originalText 必须与输入中的 originalText 完全一致。',
+    '8. usageNote 必须简短，控制在一行内。',
+    '9. example 如果无必要可为空字符串，note 可以为空字符串。',
+    '10. isImportant 根据学习价值判断 true 或 false。',
     '',
     `文章标题：${title}`,
     `文章内容：${content}`,
@@ -102,8 +99,8 @@ function validateLearningPointsRaw(input) {
   }
 
   const cleaned = input.map((item) => normalizeString(item)).filter(Boolean);
-  if (cleaned.length < 7 || cleaned.length > 14) {
-    throw new Error('learningPoints must contain 7-14 items');
+  if (cleaned.length < 5 || cleaned.length > 14) {
+    throw new Error('learningPoints must contain 5-14 items');
   }
 
   return cleaned;
@@ -130,20 +127,9 @@ function validateLearningPointCategories(points) {
     buckets[categorizeLearningPoint(point)] += 1;
   }
 
-  if (buckets.unknown > 0) {
-    throw new Error('learningPoints must use [词汇]/[语法]/[表达]/[内容] prefix');
-  }
-  if (buckets.vocab < 2) {
-    throw new Error('learningPoints must include at least 2 [词汇] points');
-  }
-  if (buckets.grammar < 2) {
-    throw new Error('learningPoints must include at least 2 [语法] points');
-  }
-  if (buckets.expression < 2) {
-    throw new Error('learningPoints must include at least 2 [表达] points');
-  }
-  if (buckets.content < 1) {
-    throw new Error('learningPoints must include at least 1 [内容] point');
+  const categorizedCount = buckets.vocab + buckets.grammar + buckets.expression + buckets.content;
+  if (categorizedCount > 0 && categorizedCount < Math.min(3, points.length)) {
+    throw new Error('learningPoints categorized coverage is too low');
   }
 }
 
@@ -337,7 +323,7 @@ async function summarizeChunkWithDeepSeek(chunk, index, totalChunks, options = {
         '约束：',
         '1. points 返回 3 到 5 条。',
         '2. point 必须是语言学习点，不得写新闻事实复述。',
-        '3. point 用中文，允许写成 1-2 句，且以 [词汇]/[语法]/[表达] 之一开头。',
+        '3. point 用中文，允许写成 1-2 句；可选使用 [词汇]/[语法]/[表达] 前缀，但不是强制。',
         '4. evidence 是支持该 point 的原文短句数组（1-2条）。',
         `当前分块：${index + 1}/${totalChunks}`,
         `分块内容：${chunk}`,
@@ -430,22 +416,21 @@ export async function summarizeArticleWithDeepSeek(input, options = {}) {
         '请输出 JSON：',
         '{"learningPoints":[{"point":"...","evidence":["..."]}],"fullTranslationZh":"..."}',
         '约束：',
-        '1. learningPoints 必须是 10 条，且只能是：3条[词汇] + 3条[语法] + 3条[表达] + 1条[内容]。',
-        '2. 每条 point 必须以模块前缀开头：[词汇]/[语法]/[表达]/[内容]。',
+        '1. learningPoints 返回 6 到 10 条。',
+        '2. 总结以语言学习价值为主，优先覆盖词汇、语法、表达，也可以加入内容梗概、句法拆解、固定搭配、语感提醒等其他角度。',
         '3. 每条 point 必须是可操作学习建议，不得只复述文章事实。',
         '4. 每条 point 建议写成 1-2 句，给用户可直接练习的提示。',
         '5. 每条 evidence 给出 1-3 条对应原文短句。',
-        '6. [内容] 条必须包含中俄双语梗概（可写 RU:... | ZH:...）。',
-        '7. [语法] 条至少1条写清主谓宾骨架与格/从句逻辑。',
-        '8. [表达] 条聚焦固定搭配/地道表达，并点出中式表达误区。',
-        '9. 必须同时基于文章整体与用户划线，优先覆盖高价值划线（isImportant=true）。',
-        '10. 若用户划线为空，请先自动挑选5个核心词再完成“关联图谱”模块。',
-        '11. fullTranslationZh 为全文自然中文翻译。',
+        '6. 若你使用模块前缀，可选用 [词汇]/[语法]/[表达]/[内容]，但不是强制。',
+        '7. 如果有内容梗概，建议包含中俄双语（可写 RU:... | ZH:...）。',
+        '8. 必须同时基于文章整体与用户划线，优先覆盖高价值划线（isImportant=true）。',
+        '9. 若用户划线为空，请先自动挑选3到5个核心词再完成总结。',
+        '10. fullTranslationZh 为全文自然中文翻译。',
         previousLearningPoints.length
-          ? '12. 已提供上一版 learningPoints，尽量避免语义重复，用不同学习角度重写。'
+          ? '11. 已提供上一版 learningPoints，尽量避免语义重复，用不同学习角度重写。'
           : '',
         regenerateRequestId
-          ? '13. 本次是“重新生成”，必须显著更换结构与切入角度，避免与上一版措辞相似。'
+          ? '12. 本次是“重新生成”，必须显著更换结构与切入角度，避免与上一版措辞相似。'
           : '',
         `文章标题：${input.title}`,
         `文章分块总结：${JSON.stringify(chunkSummaries)}`,
